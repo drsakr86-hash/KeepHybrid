@@ -1,0 +1,35 @@
+rules_version = '2';
+// keepMoney — قواعد Firestore (v4.9: الحركات مقسّمة بالشهر)
+// كل مستخدم يقرأ ويكتب بياناته فقط: users/{uid} + users/{uid}/tx/{شهر}
+// الضيف (Anonymous) لا يقرأ ولا يكتب.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null
+          && request.auth.uid == uid
+          && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      // حماية: بعد ما البيانات تتقسّم بالشهر (_fmt = 4) نسخة التطبيق القديمة
+      // ما تقدرش تكتب فوق المستند الرئيسي وتضيّع الحركات.
+      allow write: if isOwner(uid) && (
+           resource == null
+        || resource.data.get('_fmt', 0) < 4
+        || (request.resource != null && request.resource.data.get('_fmt', 0) >= 4)
+      );
+
+      // حركات كل شهر
+      match /tx/{month} {
+        allow read, write: if isOwner(uid);
+      }
+    }
+
+    // أي مسار آخر مغلق
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
