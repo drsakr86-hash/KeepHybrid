@@ -5414,10 +5414,13 @@ const SYNC_META_KEY   = 'km_sync_meta';        // لكل حساب: آخر نسخ
 const LEGACY_CLAIM_KEY= 'km_legacy_claim';     // من تبنّى بيانات النسخة المحلية القديمة
 const LAST_USER_KEY   = 'km_last_user';        // للجلسة الاحتياطية عند غياب مكتبة Firebase
 const CLOUD_DOC_LIMIT = 1000000;               // هامش أمان تحت حد Firestore (1 MiB)
+const CLOUD_FMT       = 4;                     // 4 = الحركات مقسّمة بالشهر في users/{uid}/tx/{YYYY-MM}
+const CHUNK_SOFT_MAX  = 700000;                // شهر أكبر من كده يتقسّم لأجزاء (YYYY-MM_2 …)
+const CLOUD_MAX_WRITES= 450;                   // حد Firestore 500 كتابة لكل عملية
 
 const KMSync = (function(){
   const RECORD_COLS = ['transactions','accounts','goals','debts','investments','recurring','subscriptions','charities'];
-  const INTERNAL = new Set(['_pending','_sync','updatedAt','_fieldAt','tombstones','resetAt',
+  const INTERNAL = new Set(['_pending','_sync','updatedAt','_fieldAt','tombstones','resetAt','_chunks','_fmt',
                             'schemaVersion','migrationLog','migratedAt','migratedFrom','futureSchema']);
   const TOMB_MAX_DAYS = 400, TOMB_MAX = 3000;
 
@@ -5481,7 +5484,7 @@ const KMSync = (function(){
     const fieldOut = {};
     const keys = new Set([...Object.keys(L), ...Object.keys(R)]);
     for(const k of keys){
-      if(RECORD_COLS.includes(k) || k==='tombstones' || k==='_fieldAt' || k==='resetAt' || k==='_sync' || k==='updatedAt') continue;
+      if(RECORD_COLS.includes(k) || k==='tombstones' || k==='_fieldAt' || k==='resetAt' || k==='_sync' || k==='updatedAt' || k==='_chunks' || k==='_fmt') continue;
       const inL = Object.prototype.hasOwnProperty.call(L,k), inR = Object.prototype.hasOwnProperty.call(R,k);
       let pick;
       if(k==='schemaVersion'){ out[k] = Math.max(num(L[k]), num(R[k])) || L[k] || R[k]; continue; }
@@ -5559,7 +5562,7 @@ const KMSync = (function(){
   /** يزيل حقول السيرفر والحالة المحلية قبل التخزين أو الرفع */
   function cleanCloud(d){
     const o = Object.assign({}, d||{});
-    delete o.updatedAt; delete o._sync; delete o._pending;
+    delete o.updatedAt; delete o._sync; delete o._pending; delete o._chunks; delete o._fmt;
     return o;
   }
   function isValidDataset(d){
@@ -5570,7 +5573,37 @@ const KMSync = (function(){
   function byteSize(str){
     try{ return new TextEncoder().encode(str).length; }catch(e){ return str.length*2; }
   }
-  return { merge, stampChanges, cleanCloud, isValidDataset, byteSize, RECORD_COLS };
+  /** بصمة نصّية حتمية (FNV-1a مزدوج ≈ 64 بت) — لمعرفة الشهر اللي اتغيّر بدون تحميله */
+  function hashStr(str){
+    let a=0x811c9dc5, b=0x9747b28c;
+    for(let i=0;i<str.length;i++){
+      const c=str.charCodeAt(i);
+      a^=c; a=Math.imul(a,0x01000193)>>>0;
+      b^=c; b=Math.imul(b,0x5bd1e995)>>>0; b^=b>>>15;
+    }
+    return a.toString(36)+'.'+b.toString(36)+'.'+str.length.toString(36);
+  }
+  const monthOf = (t)=>{ const m = t && typeof t.date==='string' && /^(\d{4})-(\d{2})/.exec(t.date); return m ? m[1]+'-'+m[2] : 'nodate'; };
+  /**
+   * تقسيم الحركات لأجزاء شهرية بترتيبها الأصلي: { 'YYYY-MM': [..], 'YYYY-MM_2': [..] }.
+   * الشهر الضخم جداً يتقسّم لأجزاء متتالية حتى لا يقترب أي مستند من حد 1MB.
+   */
+  function splitTx(list){
+    const by = new Map();
+    for(const t of arr(list)){ const m=monthOf(t); if(!by.has(m)) by.set(m,[]); by.get(m).push(t); }
+    const out = {};
+    for(const [m,items] of by){
+      let part=[], size=2, n=1;
+      for(const t of items){
+        const sz = byteSize(JSON.stringify(t))+1;
+        if(part.length && size+sz > CHUNK_SOFT_MAX){ out[n===1?m:m+'_'+n] = part; n++; part=[]; size=2; }
+        part.push(t); size+=sz;
+      }
+      out[n===1?m:m+'_'+n] = part;
+    }
+    return out;
+  }
+  return { merge, stampChanges, cleanCloud, isValidDataset, byteSize, hashStr, splitTx, monthOf, RECORD_COLS };
 })();
 
 /**
@@ -5595,6 +5628,7 @@ function createHybridAdapter(db, uid, opts){
   const DKEY   = ns(DATA_KEY);
   const MKEY   = ns(SYNC_META_KEY);
   const ref    = ()=> db.collection('users').doc(uid);
+  const chunkRef = (k)=> ref().collection('tx').doc(k);
 
   let timer=null, inflight=null, again=false, disposed=false;
   let state='idle', lastError=null, cacheStr=null, cacheObj=null;
@@ -5605,6 +5639,65 @@ function createHybridAdapter(db, uid, opts){
                    : (typeof ts==='string' ? Date.parse(ts) : null);
   const tokenOf = (d)=> ({ ms: tsMs(d && d.updatedAt), sid: (d && d._sync && d._sync.sid) || null });
   const sameToken = (a,b)=> !!(a && b && a.ms!=null && a.ms===b.ms && a.sid===b.sid);
+
+  /**
+   * يجمع البيانات السحابية من المستند الرئيسي + أجزاء الشهور.
+   *  • الشكل القديم (بدون _fmt): الحركات داخل المستند الرئيسي — يُقرأ كما هو.
+   *  • الشكل الشهري: _chunks = { 'YYYY-MM': {h,n} } ولكل جزء مستند بنفس البصمة.
+   *  • reuse(key,h): جزء لم يتغيّر منذ آخر مزامنة ⇒ نستعمل نسخة الجهاز بدل تحميله.
+   */
+  async function assemble(d, getChunk, reuse){
+    const fmt = Number(d && d._fmt)||0;
+    if(fmt > CLOUD_FMT){ const e=new Error('cloud format '+fmt); e.code='newer-format'; throw e; }
+    if(fmt < CLOUD_FMT) return { ds:d, man:null, fmt };
+    const man = (d._chunks && typeof d._chunks==='object') ? d._chunks : {};
+    const keys = Object.keys(man).sort();
+    const parts = await Promise.all(keys.map(async k=>{
+      const h = man[k] && man[k].h;
+      const mine = reuse ? reuse(k, h) : null;
+      if(mine) return mine;
+      const s = await getChunk(k);
+      const cd = s && s.exists ? s.data() : null;
+      if(!cd || cd.h!==h || !Array.isArray(cd.transactions)){ const e=new Error('chunk '+k+' mismatch'); e.code='chunk-mismatch'; throw e; }
+      return cd.transactions;
+    }));
+    const ds = Object.assign({}, d); delete ds._chunks; delete ds._fmt;
+    ds.transactions = [].concat(...parts);
+    return { ds, man, fmt };
+  }
+  /** نسخة الجهاز من جزء معيّن — مسموح بها فقط لو بصمته في السحابة = بصمته وقت آخر مزامنة */
+  function reuseFrom(localObj, cloudMain){
+    const known = meta && meta.chunks;
+    if(!known || !localObj || typeof localObj!=='object') return null;
+    if(((cloudMain && cloudMain.resetAt)||'') !== (meta.resetAt||'')) return null;
+    let split = null;
+    return (k,h)=>{
+      if(!h || known[k]!==h) return null;
+      if(!split) split = KMSync.splitTx(localObj.transactions);
+      return split[k] || null;
+    };
+  }
+  /** قراءة متّسقة خارج العمليات: لو جهاز آخر كتب أثناء التحميل نعيد القراءة */
+  async function cloudRead(firstSnap, reuse){
+    let snap = firstSnap;
+    for(let i=0;i<4;i++){
+      if(!snap) snap = await withTimeout(ref().get(), 15000);
+      if(!snap.exists) return { exists:false };
+      const d = snap.data() || {};
+      try{
+        const r = await assemble(d, k=>withTimeout(chunkRef(k).get(), 15000), reuse);
+        return { exists:true, d, tok:tokenOf(d), ds:r.ds, man:r.man, fmt:r.fmt };
+      }catch(e){
+        if(e && e.code==='chunk-mismatch'){ snap=null; continue; }
+        throw e;
+      }
+    }
+    const e=new Error('cloud kept changing'); e.code='aborted'; throw e;
+  }
+  function setBase(tok, man, resetAt){
+    meta.base = tok; meta.chunks = (tok && man) ? man_h(man) : null; meta.resetAt = resetAt||'';
+  }
+  const man_h = (man)=>{ const o={}; for(const k in (man||{})) o[k] = man[k] && man[k].h; return o; };
 
   function readMeta(){ try{ return JSON.parse(local.get(MKEY)||'null'); }catch(e){ return null; } }
   function writeMeta(m){ try{ local.set(MKEY, JSON.stringify(m)); }catch(e){ console.warn('تعذّر حفظ حالة المزامنة', e); } }
@@ -5652,6 +5745,7 @@ function createHybridAdapter(db, uid, opts){
   function classify(e){
     const code = (e && e.code) || '';
     if(code==='too-large' || (code==='invalid-argument' && /exceed|size|1 MiB|maximum/i.test(e.message||''))) return 'too-large';
+    if(code==='newer-format') return 'outdated';
     if(['unavailable','deadline-exceeded','cancelled','timeout','auth/network-request-failed'].includes(code)) return 'offline';
     if(!online()) return 'offline';
     return 'error';
@@ -5705,23 +5799,46 @@ function createHybridAdapter(db, uid, opts){
     try{
       res = await withTimeout(db.runTransaction(async tx=>{
         const snap = await tx.get(ref());
-        let body = L0, merged = false, cloudBad = null;
+        let body = L0, merged = false, cloudBad = null, cloudMan = null, legacy = null;
         if(snap.exists){
           const d = snap.data() || {};
+          const fmt = Number(d._fmt)||0;
+          if(fmt > CLOUD_FMT){ const e=new Error('cloud format '+fmt); e.code='newer-format'; throw e; }
+          if(fmt === CLOUD_FMT) cloudMan = d._chunks || {};
           if(!sameToken(tokenOf(d), meta.base)){
-            const cd = KMSync.cleanCloud(d);
+            // كل القراءات قبل أي كتابة (شرط Firestore)
+            const r = await assemble(d, k=>tx.get(chunkRef(k)), reuseFrom(L0, d));
+            const cd = KMSync.cleanCloud(r.ds);
             if(KMSync.isValidDataset(cd)){ body = KMSync.merge(L0, cd); merged = true; }
             else cloudBad = JSON.stringify(cd);
+            if(fmt < CLOUD_FMT && merged) legacy = JSON.stringify(cd);
+          } else if(fmt < CLOUD_FMT){
+            legacy = JSON.stringify(KMSync.cleanCloud(d));
           }
         }
-        const upload = KMSync.cleanCloud(body);
-        const str = JSON.stringify(upload);
-        if(KMSync.byteSize(str) > CLOUD_DOC_LIMIT){ const e=new Error('Document exceeds size limit'); e.code='too-large'; throw e; }
-        tx.set(ref(), Object.assign(JSON.parse(str), {
-          _sync:{ sid, device: deviceId(), at: nowIso(), v:3 },
+        const upload = JSON.parse(JSON.stringify(KMSync.cleanCloud(body)));
+        const parts = KMSync.splitTx(upload.transactions);
+        delete upload.transactions;
+        const man = {}, writes = [];
+        for(const k of Object.keys(parts)){
+          const str = JSON.stringify(parts[k]);
+          if(KMSync.byteSize(str) > CLOUD_DOC_LIMIT){ const e=new Error('Chunk exceeds size limit'); e.code='too-large'; throw e; }
+          const h = KMSync.hashStr(str);
+          man[k] = { h, n: parts[k].length };
+          if(!cloudMan || !cloudMan[k] || cloudMan[k].h!==h) writes.push([k, parts[k], h]);
+        }
+        const dels = cloudMan ? Object.keys(cloudMan).filter(k=>!man[k]) : [];
+        if(writes.length + dels.length + 1 > CLOUD_MAX_WRITES){ const e=new Error('Too many chunk writes'); e.code='too-large'; throw e; }
+        const main = Object.assign(upload, {
+          _fmt: CLOUD_FMT, _chunks: man,
+          _sync:{ sid, device: deviceId(), at: nowIso(), v:CLOUD_FMT },
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-        }));
-        return { body, merged, cloudBad };
+        });
+        if(KMSync.byteSize(JSON.stringify(main)) > CLOUD_DOC_LIMIT){ const e=new Error('Document exceeds size limit'); e.code='too-large'; throw e; }
+        for(const [k, list, h] of writes) tx.set(chunkRef(k), { k, h, sid, transactions:list });
+        for(const k of dels) tx.delete(chunkRef(k));
+        tx.set(ref(), main);
+        return { body, merged, cloudBad, man, legacy, nWrites: writes.length + dels.length + 1 };
       }), 25000);
     }catch(e){
       console.warn('تأجّل الرفع', e && (e.code||e.message));
@@ -5738,6 +5855,8 @@ function createHybridAdapter(db, uid, opts){
     }catch(e){}
 
     if(res.cloudBad){ backupLocal('cloud-invalid', res.cloudBad); }
+    // أول رفع بالشكل الشهري: نسخة من الشكل السحابي القديم كما كان (مرة واحدة)
+    if(res.legacy && !meta.splitAt){ backupLocal('pre-monthly-split', res.legacy); meta.splitAt = nowIso(); }
     const Lnow = local.get(DKEY);
     let changed = false;
     if(Lnow === L0str){
@@ -5749,7 +5868,8 @@ function createHybridAdapter(db, uid, opts){
       if(res.merged && cur){ writeData(KMSync.merge(cur, res.body), true); changed = true; }
       again = true;
     }
-    meta.base = newBase; meta.lastOkAt = nowIso(); meta.lastError = null; lastError = null;
+    setBase(newBase, res.man, res.body && res.body.resetAt);
+    meta.lastOkAt = nowIso(); meta.lastError = null; meta.lastWrites = res.nWrites; lastError = null;
     writeMeta(meta);
     if(changed){ try{ onRemote(local.get(DKEY), 'merged'); }catch(e){ console.error(e); } }
     if(res.cloudBad) emit('conflict', { reason:'cloud-invalid' });
@@ -5771,25 +5891,28 @@ function createHybridAdapter(db, uid, opts){
     if(isPending()) return flushNow();
     if(inflight) return inflight;
     if(!online()){ emit('offline'); return 'offline'; }
-    let snap;
-    try{ snap = await withTimeout(ref().get(), 15000); }
-    catch(e){ fail(e); return 'error'; }
-    if(isPending()) return flushNow();               // تعديل وصل أثناء الانتظار
-    if(!snap.exists){
-      if(readData()){ writeData(readData(), true); return flushNow(); }
-      lastError=null; emit(idleState()); return 'empty';
-    }
-    const d = snap.data()||{};
-    const tok = tokenOf(d);
-    if(sameToken(tok, meta.base)){ lastError=null; emit(idleState()); return 'same'; }
-    const cd = KMSync.cleanCloud(d);
+    let snap, c;
+    try{
+      snap = await withTimeout(ref().get(), 15000);
+      if(isPending()) return flushNow();               // تعديل وصل أثناء الانتظار
+      if(!snap.exists){
+        if(readData()){ writeData(readData(), true); return flushNow(); }
+        lastError=null; emit(idleState()); return 'empty';
+      }
+      if(sameToken(tokenOf(snap.data()||{}), meta.base)){ lastError=null; emit(idleState()); return 'same'; }
+      c = await cloudRead(snap, reuseFrom(readData(), snap.data()||{}));
+    }catch(e){ fail(e); return 'error'; }
+    if(isPending()) return flushNow();
+    if(!c.exists){ lastError=null; emit(idleState()); return 'empty'; }
+    const tok = c.tok;
+    const cd = KMSync.cleanCloud(c.ds);
     if(!KMSync.isValidDataset(cd)){
       backupLocal('cloud-invalid', JSON.stringify(cd));
       if(readData()){ writeData(readData(), true); return flushNow(); }
       emit('conflict', { reason:'cloud-invalid' }); return 'cloud-invalid';
     }
     writeData(cd, false);
-    meta.base = tok; meta.lastOkAt = nowIso(); meta.lastError=null; lastError=null; writeMeta(meta);
+    setBase(tok, c.man, cd.resetAt); meta.lastOkAt = nowIso(); meta.lastError=null; lastError=null; writeMeta(meta);
     try{ onRemote(local.get(DKEY), 'pulled'); }catch(e){ console.error(e); }
     emit(idleState());
     return 'pulled';
@@ -5837,32 +5960,40 @@ function createHybridAdapter(db, uid, opts){
       const local0 = readData();
       const hasLocal = !!(local0 && typeof local0==='object');
       if(!online()){ emit('offline'); return hasLocal ? 'local-offline' : 'empty-offline'; }
-      let snap;
-      try{ snap = await withTimeout(ref().get(), 15000); }
+      let c;
+      try{
+        const snap = await withTimeout(ref().get(), 15000);
+        // نفس النسخة اللي نعرفها ⇒ لا داعي لتحميل الشهور
+        if(snap.exists && hasLocal && sameToken(tokenOf(snap.data()||{}), meta.base) && !(Number((snap.data()||{})._fmt) > CLOUD_FMT)){
+          lastError = null;
+          if(isPending()){ await flushNow(); return 'local-newer'; }
+          emit(idleState()); return 'same';
+        }
+        c = await cloudRead(snap, hasLocal ? reuseFrom(local0, snap.data()||{}) : null);
+      }
       catch(e){ fail(e); return hasLocal ? 'local-offline' : 'empty-offline'; }
       lastError = null;
 
-      if(!snap.exists){
+      if(!c.exists){
         if(hasLocal){ writeData(local0, true); await flushNow(); return 'pushed-local'; }
-        meta.base = null; writeMeta(meta); emit(idleState()); return 'empty';
+        setBase(null); writeMeta(meta); emit(idleState()); return 'empty';
       }
-      const d = snap.data() || {};
-      const tok = tokenOf(d);
-      const cd = KMSync.cleanCloud(d);
+      const tok = c.tok;
+      const cd = KMSync.cleanCloud(c.ds);
       if(!KMSync.isValidDataset(cd)){
         backupLocal('cloud-invalid', JSON.stringify(cd));
         if(hasLocal){ writeData(local0, true); await flushNow(); return 'cloud-invalid-local-kept'; }
         emit('conflict', { reason:'cloud-invalid' }); return 'cloud-invalid';
       }
       if(!hasLocal){
-        writeData(cd, false); meta.base = tok; writeMeta(meta); emit(idleState()); return 'from-cloud';
+        writeData(cd, false); setBase(tok, c.man, cd.resetAt); writeMeta(meta); emit(idleState()); return 'from-cloud';
       }
       if(sameToken(tok, meta.base)){
         if(isPending()){ await flushNow(); return 'local-newer'; }
         emit(idleState()); return 'same';
       }
       if(!isPending()){
-        writeData(cd, false); meta.base = tok; writeMeta(meta); emit(idleState()); return 'cloud-newer';
+        writeData(cd, false); setBase(tok, c.man, cd.resetAt); writeMeta(meta); emit(idleState()); return 'cloud-newer';
       }
       backupLocal('pre-merge', local.get(DKEY));
       writeData(KMSync.merge(local0, cd), true);
@@ -6258,6 +6389,7 @@ const SYNC_STATES = {
   offline  :{ t:'📴 أوفلاين · محلي',   c:'var(--amber)', tip:'لا اتصال. تعديلاتك محفوظة على هذا الجهاز وستُرفع عند عودة الاتصال' },
   error    :{ t:'⚠️ خطأ مزامنة',       c:'var(--coral)', tip:'تعديلاتك محفوظة على الجهاز لكن السحابة رفضت الرفع. اضغط لإعادة المحاولة' },
   'too-large':{ t:'⚠️ حجم كبير',       c:'var(--coral)', tip:'بياناتك تجاوزت حد مستند السحابة (1MB). محفوظة محلياً فقط — صدّر نسخة احتياطية' },
+  outdated :{ t:'⬆️ حدّث التطبيق',     c:'var(--coral)', tip:'بياناتك في السحابة محفوظة بنسخة أحدث من التطبيق. حدّث التطبيق — لم يُرفع شيء من هذا الجهاز حتى لا تتلف البيانات' },
   conflict :{ t:'⚠️ تعارض',            c:'var(--coral)', tip:'وُجدت نسخة سحابية غير صالحة؛ حُفظت كنسخة احتياطية على الجهاز وبقيت بياناتك الصالحة' },
   local    :{ t:'💾 محلي فقط',         c:'var(--muted)', tip:'جلسة بدون اتصال بالسحابة — الحفظ على هذا الجهاز فقط' },
   guest    :{ t:'👤 ضيف · محلي',       c:'var(--muted)', tip:'وضع الضيف لا يرفع أي بيانات للسحابة' }
@@ -6282,7 +6414,11 @@ function setSyncBadge(state, detail){
 /** لمسة الشارة: شرح الحالة + إعادة محاولة آمنة (الرفع idempotent) */
 async function syncBadgeTap(){
   const a=storageAdapter();
-  const s=SYNC_STATES[_syncState]; if(s) toast(s.tip, _syncState==='synced'?'success':'info');
+  const s=SYNC_STATES[_syncState];
+  const le = a.lastError ? a.lastError() : null;
+  if(_syncState==='error' && le && le.code==='permission-denied')
+    toast('السحابة رفضت الكتابة — تأكد إن قواعد Firestore الجديدة (اللي فيها tx) منشورة', 'info');
+  else if(s) toast(s.tip, _syncState==='synced'?'success':'info');
   if(a.retry && ['error','offline','pending','too-large','conflict','synced'].includes(_syncState)){
     try{ await a.retry(); }catch(e){}
   }
