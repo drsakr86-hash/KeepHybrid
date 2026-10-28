@@ -10409,7 +10409,10 @@ function aiErr(e){
     return /per.?day|PerDay|daily/i.test(msg)
       ? 'خلص الحد اليومي المجاني لـ Gemini، وهيرجع بكرة. التسجيل البسيط ("٣٠٠ فاكهة") شغال من غيره.'
       : 'وصلت لحد الاستخدام المجاني مؤقتاً. جرّب كمان دقيقة — والتسجيل البسيط ("٣٠٠ فاكهة") شغال من غيره.';
-  if(/SERVICE_DISABLED|has not been used|is disabled|firebasevertexai|firebaseml|api-not-enabled/i.test(msg)) return 'خدمة AI Logic مش متفعّلة في مشروع Firebase. فعّلها من Console ← AI Logic ← Get started.';
+  // الطلب لم يصل للسيرفر أصلاً (الرابط نفسه فيه "firebasevertexai" فلا يُستدل به على التفعيل)
+  if(/failed to fetch|networkerror|load failed|network request failed/i.test(msg))
+    return 'طلب Gemini ما وصلش للسيرفر (Failed to fetch). جرّب نفس الاختبار من Chrome على نفس الموبايل: لو اشتغل هناك فالمشكلة في WebView/تطبيق Median، ولو لأ فالشبكة أو DNS بيحجب googleapis.';
+  if(/SERVICE_DISABLED|has not been used|is disabled|api-not-enabled/i.test(msg)) return 'خدمة AI Logic مش متفعّلة في مشروع Firebase. فعّلها من Console ← AI Logic ← Get started.';
   if(/not found|404|model/i.test(msg)) return 'اسم النموذج مش متاح. غيّره من إعدادات المساعد.';
   if(/ai-timeout/.test(msg)) return 'Gemini اتأخر في الرد فوقفت الطلب. جرّب تاني — ولو كان فيه تسجيل اتنفّذ هتلاقيه في السجل.';
   if(/ai-sdk-load-failed/.test(msg)) return 'تعذّر تحميل مكتبة المساعد. اتأكد من الإنترنت واعمل تحديث للصفحة (Refresh).';
