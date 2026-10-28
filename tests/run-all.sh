@@ -12,6 +12,7 @@ if [ -n "$OLD" ]; then run chunks node tests/chunk-suite.js "$APP" "$OLD"; else 
 run security  node tests/security-suite.js "$APP"
 run persist   node tests/persist-suite.js "$APP"
 run finance   node tests/finance-suite.js "$APP"
+run wealth    node tests/wealth-suite.js "$APP"
 run ai        node tests/ai-suite.js "$APP"
 run voice     env KM_FAKE_MEDIA=1 node tests/voice-suite.js "$APP"
 run proactive node tests/pro-suite.js "$APP"
