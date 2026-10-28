@@ -1080,6 +1080,25 @@ body.ai-open .toast{bottom:150px}
 .al-row.sev3 .al-txt{color:var(--coral)}
 .al-row.sev2 .al-txt{color:var(--amber)}
 .al-ico{flex-shrink:0;font-size:15px}
+/* ثروتي */
+.wl-net{font-size:24px;font-weight:900;margin:2px 0 4px}
+.wl-sub{font-size:11.5px;color:var(--muted);line-height:1.7}
+.wl-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px}
+.wl-row:last-child{border-bottom:none}
+.wl-row .wl-l{flex:1;min-width:0}
+.wl-row .wl-v{font-weight:800;white-space:nowrap}
+.wl-bar{height:6px;border-radius:99px;background:var(--border);overflow:hidden;margin-top:5px}
+.wl-bar>i{display:block;height:100%;background:var(--mint);border-radius:99px}
+.wl-tgt{font-size:11px;color:var(--muted)}
+.wl-q{margin-bottom:14px}
+.wl-q .wl-qt{font-size:13px;font-weight:800;margin-bottom:7px}
+.wl-q .wl-opts{display:flex;flex-wrap:wrap;gap:7px}
+.wl-step{display:flex;gap:8px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--border);font-size:13px;line-height:1.7}
+.wl-step:last-child{border-bottom:none}
+.wl-step .wl-n{flex-shrink:0;width:22px;height:22px;border-radius:50%;background:rgba(0,229,190,.14);color:var(--mint);font-size:11px;font-weight:900;display:flex;align-items:center;justify-content:center;margin-top:1px}
+.wl-why{font-size:11.5px;color:var(--muted);line-height:1.8;margin-top:8px}
+.wl-inp{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
+
 .al-txt{flex:1;min-width:0}
 .al-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;min-width:32px;min-height:32px;cursor:pointer;flex-shrink:0;font-size:13px}
 .ai-say{background:none;border:none;color:var(--muted);font-size:14px;cursor:pointer;padding:6px 8px;margin:-4px -6px -4px 0;vertical-align:middle}
@@ -1570,6 +1589,7 @@ body.ai-open .toast{bottom:150px}
       <button class="atab active" id="atab-month"   onclick="switchAnalysis('month')">📊 مخطط الشهر</button>
       <button class="atab"        id="atab-quarter" onclick="switchAnalysis('quarter')">📅 ربع سنوي</button>
       <button class="atab"        id="atab-annual"  onclick="switchAnalysis('annual')">📆 سنوي</button>
+      <button class="atab"        id="atab-wealth"  onclick="switchAnalysis('wealth')">💼 ثروتي</button>
       <button class="atab"        id="atab-advisor" onclick="switchAnalysis('advisor')">🤖 المستشار</button>
       <button class="atab"        id="atab-report"  onclick="switchAnalysis('report')">📄 تقرير</button>
     </div>
@@ -1613,6 +1633,12 @@ body.ai-open .toast{bottom:150px}
         <button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center" onclick="printReport()">🖨️ PDF</button>
         <button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center" onclick="shareReport()">📤 مشاركة</button>
       </div>
+    </div>
+
+    <!-- ── VIEW: WEALTH (ثروتي + دستوري المالي) ── -->
+    <div id="aview-wealth" style="display:none">
+      <div class="card" id="wealthCard"></div>
+      <div class="card" id="planCard"></div>
     </div>
 
     <!-- ── VIEW: AI ADVISOR ── -->
@@ -6848,6 +6874,7 @@ function openApp(){
   applyDashboardLayout();
   refreshUI(); switchTab('home'); renderCatBudgetList(); updateSettingsHints();
   setTimeout(()=>{ if(_unlocked) aiMaybeWeekly().catch(e=>console.warn(e)); }, 2500);
+  setTimeout(()=>{ if(_unlocked){ try{ WE.recordSnapshot({ persist:false }); }catch(e){ console.warn(e); } } }, 3000);
 }
 
 
@@ -9310,7 +9337,7 @@ function scrollTabIntoView(key){
 function switchAnalysis(view){
   _analysisView = view;
   // update sub-tab active state
-  ['month','quarter','annual','advisor','report'].forEach(v=>{
+  ['month','quarter','annual','wealth','advisor','report'].forEach(v=>{
     const el = document.getElementById('atab-'+v);
     if(el) el.classList.toggle('active', v===view);
   });
@@ -9322,11 +9349,14 @@ function switchAnalysis(view){
   if(monthEl)   monthEl.style.display   = view==='month'   ? 'block' : 'none';
   if(budgetEl)  budgetEl.style.display  = (view==='quarter'||view==='annual') ? 'block' : 'none';
   if(advisorEl) advisorEl.style.display = view==='advisor' ? 'block' : 'none';
+  const wealthEl = document.getElementById('aview-wealth');
+  if(wealthEl)  wealthEl.style.display  = view==='wealth'  ? 'block' : 'none';
   if(reportEl)  reportEl.style.display  = view==='report'  ? 'block' : 'none';
 
   scrollTabIntoView(view);
   if(view==='month')        renderChart();
   else if(view==='advisor')  renderAdvisor();
+  else if(view==='wealth')   renderWealth();
   else if(view==='report')   renderReport();
   else { _budgetPeriod = view; renderBudget(); }
 }
@@ -10253,7 +10283,8 @@ function aiExec(name, a){
                       accounts: nw.rows.map(r=>({ name:r.name, balance:Math.round(r.balance) })) },
           debts:{ i_owe:d.totalIOwe, owed_to_me:d.totalOwedToMe, overdue_count:d.overdueCount, monthly_installments:d.monthlyLoad },
           goals: Q.goalsOverview().rows.slice(0,5).map(g=>({ name:g.name, target:g.target, saved:g.saved, pct:g.pct })),
-          upcoming_30_days: Upcoming.items(30).slice(0,8).map(i=>({ title:i.title, amount:i.amount, date:i.date, overdue:i.overdue }))
+          upcoming_30_days: Upcoming.items(30).slice(0,8).map(i=>({ title:i.title, amount:i.amount, date:i.date, overdue:i.overdue })),
+          wealth_plan: PE.forAI()
         };
       }
       case 'set_budget': {
@@ -10349,6 +10380,7 @@ function aiSystem(){
 - استخدم فئة من الموجودة لو مناسبة: ${cats.join('، ')||'لا توجد'}.
 - الحسابات: ${activeAccounts().map(a=>a.name).join('، ')}.
 - لو الأداة رجّعت ميزانية قربت أو اتجاوزت، نبّه المستخدم في نفس الرد.
+- شاشة "ثروتي" فيها صافي الثروة وتوزيعها و"دستور مالي" (صندوق طوارئ، نسبة ادخار، توزيع شهادات/ذهب/أسهم وصناديق) وخطوات تالية محسوبة. لو اتسألت عن الثروة أو الخطة أو تدّخر/توزّع إزاي، خد الأرقام من wealth_plan في get_overview بالظبط، واشرح الخطوات اللي فيها بلغة بسيطة. ما ترشّحش أسهم أو صناديق أو بنوك بعينها، وما تخترعش عوائد. لو مفيش خطة، قوله يعملها من تحليل ← ثروتي. القرار دايماً للمستخدم.
 - شاشة "المستشار" في التطبيق بتحسب درجة صحة مالية من 6 محاور. لو اتسألت عنها أو عن محور منها، خد الأرقام من health في get_overview بالظبط، واشرح ليه المحور واخد الدرجة دي، والمحور غير المقيس ناقصه إيه عشان يتقاس، واقترح خطوات عملية بأرقام من بياناته.
 - ما تحذفش غير بطلب صريح وبعد ما تلاقي الحركة. التطبيق هيطلب موافقة المستخدم بنفسه؛ لو رجع إن المستخدم رفض، ما تحاولش تاني.
 - نصايحك عامة ومبنية على أرقامه؛ إنت مش مستشار مالي مرخّص، وما توصّيش بشراء أو بيع أصل بعينه.`;
@@ -10704,6 +10736,308 @@ function proSave(s){
 }
 
 /** التنبيهات الحالية مرتبة بالخطورة — دالة نقية تقرأ المحرّكات فقط */
+// ══════════════════════════════════════════════════════════
+// مدير الثروة — المرحلة 1 (صورة الثروة) و2 (الدستور المالي)
+// ──────────────────────────────────────────────────────────
+// • كل الأرقام والاقتراحات تُحسب هنا بقواعد ثابتة معلنة (حتمية).
+//   Gemini يقرأها ويشرحها فقط — لا يخترع أرقاماً.
+// • لا شيء يُنفَّذ تلقائياً: الخطة تُحفظ بموافقة المستخدم، والاقتراحات نصوص.
+// • جنيه مصري فقط في هذه المرحلة.
+// ══════════════════════════════════════════════════════════
+const WEALTH_BUCKETS = Object.freeze({
+  liquid:{ label:'سيولة (كاش وحسابات)', icon:'💵' },
+  cert  :{ label:'شهادات وودائع',       icon:'📜' },
+  gold  :{ label:'ذهب',                 icon:'🥇' },
+  equity:{ label:'أسهم وصناديق',        icon:'📈' },
+  other :{ label:'أصول أخرى (عقار/رقمية)', icon:'🏘️' }
+});
+const PLAN_BUCKETS = ['cert','gold','equity'];      // ما يُوزَّع عليه المال طويل الأجل
+const WEALTH_HISTORY_MAX = 60;
+const PRICE_STALE_DAYS = 35;
+
+const WE = {
+  bucketOf(kind){ return kind==='cert' ? 'cert' : kind==='gold' ? 'gold' : (kind==='stock'||kind==='fund') ? 'equity' : 'other'; },
+  /** صورة الثروة الآن: صافي الثروة + توزيعها على الأوعية */
+  snapshot(){
+    const nw=FE.netWorth();
+    const b={ liquid:FE.liquidAssets(), cert:0, gold:0, equity:0, other:0 };
+    for(const a of Repo.investments()){
+      if(a.archived) continue;
+      const v=(Number(a.qty)||0)*(Number(a.currentPrice)||0);
+      if(isFinite(v)) b[this.bucketOf(a.kind)] += v;
+    }
+    return { net:nw.net, assets:nw.assets, liabilities:nw.liabilities, receivables:nw.debtDue||0, buckets:b };
+  },
+  stalePrices(){
+    const now=Date.now();
+    return Repo.investments().filter(a=>!a.archived).map(a=>{
+      const t=Date.parse(a.priceUpdatedAt||a.buyDate||'');
+      return { a, days: isFinite(t) ? Math.floor((now-t)/86400000) : null };
+    }).filter(x=>x.days==null || x.days>PRICE_STALE_DAYS);
+  },
+  history(){ return Array.isArray(data.wealthHistory) ? data.wealthHistory : []; },
+  /**
+   * لقطة الشهر الحالي: مرة في اليوم على الأكثر، والشهور السابقة تبقى كما سُجّلت.
+   * persist:false ⇒ في الذاكرة فقط وتُحفظ مع أول حفظ عادي — لا كتابة سحابية بلا تعديل من المستخدم.
+   */
+  recordSnapshot(opts){
+    const persist = !(opts && opts.persist===false);
+    if(!hasAnyActivity()) return false;
+    const mo=cur_month(), today=today_str(), s=this.snapshot();
+    const r=(x)=>Math.round(x);
+    const entry={ month:mo, date:today, net:r(s.net), assets:r(s.assets), liabilities:r(s.liabilities),
+                  buckets:Object.fromEntries(Object.entries(s.buckets).map(([k,v])=>[k,r(v)])) };
+    const hist=this.history().slice();
+    const i=hist.findIndex(h=>h && h.month===mo);
+    if(i>=0){
+      const old=hist[i];
+      if(old.date===today || JSON.stringify({...old,date:''})===JSON.stringify({...entry,date:''})) return false;
+      hist[i]=entry;
+    } else hist.push(entry);
+    hist.sort((a,b)=>a.month<b.month?-1:1);
+    const prev=data.wealthHistory;
+    data.wealthHistory=hist.slice(-WEALTH_HISTORY_MAX);
+    if(!persist) return true;
+    if(!save()){ data.wealthHistory=prev; return false; }
+    return true;
+  }
+};
+
+const PE = {
+  get(){ return (data.plan && data.plan.v===1) ? data.plan : null; },
+  /** متوسط المصروف الشهري (آخر 6 شهور فيها مصروف) */
+  avgExpense(){ return HE.avgMonthlyExpense(cur_month(), 6); },
+  /** معدل الادخار الفعلي: آخر 3 شهور مكتملة فيها دخل */
+  savingsRateActual(){
+    const months=Q.lastMonths(4, cur_month()).slice(1);
+    let inc=0, sav=0, n=0;
+    for(const m of months){ const t=Q.monthTotals(m); if(t.inc>0){ inc+=t.inc; sav+=t.sav; n++; } }
+    return n ? { rate:sav/inc, avgIncome:inc/n, months:n } : { rate:null, avgIncome:null, months:0 };
+  },
+  /**
+   * الاقتراح من إجابات المقابلة — قواعد عامة معلنة (ليست نصيحة استثمار مرخّصة):
+   *  طوارئ: دخل ثابت 4 شهور، متغيّر 8 · من يعولهم +1/+2 · بحد أقصى 12
+   *  ادخار: الأعلى بين 20% وفعلك الحالي +5 نقاط · بحد أقصى 50%
+   *  توزيع طويل الأجل حسب تحمّل المخاطرة، ثم تعديل حسب المدة.
+   */
+  recommend(ans){
+    const why=[];
+    let em = ans.income==='variable' ? 8 : 4;
+    why.push(ans.income==='variable' ? 'دخلك متغيّر ⇒ صندوق طوارئ أكبر (8 شهور كبداية)' : 'دخلك ثابت ⇒ 4 شهور كبداية');
+    if(ans.dependents){ em += ans.income==='variable' ? 2 : 1; why.push('فيه ناس بتعولهم ⇒ شهور إضافية'); }
+    em=Math.min(12, em);
+    const cur=this.savingsRateActual();
+    let sr = cur.rate==null ? 20 : Math.max(20, Math.round(cur.rate*100)+5);
+    sr=Math.min(50, sr);
+    why.push(cur.rate==null ? 'مفيش دخل مسجّل كفاية ⇒ ادخار 20% كبداية'
+                            : `معدل ادخارك الفعلي ${Math.round(cur.rate*100)}% ⇒ المستهدف ${sr}%`);
+    const base={ low:{cert:70,gold:20,equity:10}, medium:{cert:50,gold:20,equity:30}, high:{cert:30,gold:20,equity:50} }[ans.risk] || {cert:50,gold:20,equity:30};
+    const al={...base};
+    why.push({low:'تحمّلك للمخاطرة منخفض ⇒ أغلب الفلوس في شهادات بعائد ثابت',
+              medium:'تحمّل متوسط ⇒ نص شهادات والباقي ذهب وأسهم/صناديق',
+              high:'تحمّل عالي ⇒ نسبة أكبر لأسهم/صناديق، مع ذهب للتحوّط'}[ans.risk]||'');
+    if(ans.horizon==='short'){ const mv=Math.min(20, al.equity); al.equity-=mv; al.cert+=mv; why.push('هتحتاج الفلوس خلال أقل من 3 سنين ⇒ أقل أسهم وأكتر شهادات'); }
+    if(ans.horizon==='long' && al.cert>=30){ al.cert-=10; al.equity+=10; why.push('مدة طويلة (+7 سنين) ⇒ مساحة أكبر شوية للأسهم/الصناديق'); }
+    why.push('الذهب 20% كتحوّط ضد التضخم وتغيّر سعر الجنيه');
+    return { emergencyMonths:em, savingsRatePct:sr, allocation:al, why };
+  },
+  validate(p){
+    const em=Number(p.emergencyMonths), sr=Number(p.savingsRatePct), al=p.allocation||{};
+    if(!(em>=1 && em<=24)) return 'شهور الطوارئ بين 1 و24';
+    if(!(sr>=0 && sr<=90)) return 'نسبة الادخار بين 0 و90';
+    const vals=PLAN_BUCKETS.map(k=>Number(al[k]));
+    if(vals.some(v=>!(v>=0 && v<=100))) return 'كل نسبة توزيع بين 0 و100';
+    if(Math.round(vals.reduce((a,b)=>a+b,0))!==100) return 'مجموع التوزيع لازم يساوي 100%';
+    return null;
+  },
+  /** حالة الخطة الآن + الخطوات التالية بالترتيب */
+  status(){
+    const p=this.get(), s=WE.snapshot(), avgExp=this.avgExpense(), sr=this.savingsRateActual();
+    const out={ hasPlan:!!p, snapshot:s, avgExpense:avgExp, savings:sr, steps:[] };
+    if(!p) return out;
+    const step=(sev,text,ask)=>out.steps.push({sev,text,ask});
+    const liquid=s.buckets.liquid;
+    const emTarget = avgExp ? p.emergencyMonths*avgExp : null;
+    out.emergency = { target:emTarget, have:liquid, months: avgExp ? liquid/avgExp : null,
+                      gap: emTarget!=null ? Math.max(0, emTarget-liquid) : null, done: emTarget!=null && liquid>=emTarget };
+    const excess = emTarget!=null ? Math.max(0, liquid-emTarget) : 0;
+    const longTotal = PLAN_BUCKETS.reduce((t,k)=>t+s.buckets[k],0) + excess;
+    out.allocation = PLAN_BUCKETS.map(k=>({ key:k, label:WEALTH_BUCKETS[k].label, icon:WEALTH_BUCKETS[k].icon,
+      value:s.buckets[k], pct: longTotal>0 ? s.buckets[k]/longTotal*100 : 0, target:Number(p.allocation[k])||0 }));
+    out.excessLiquid = excess; out.longTotal = longTotal;
+
+    if(!avgExp) step(2,'سجّل مصاريفك شهر على الأقل عشان أقدر أحسب صندوق الطوارئ المطلوب.', null);
+    else if(!out.emergency.done)
+      step(3, `كمّل صندوق الطوارئ: ناقص ${fmt(out.emergency.gap)} جنيه. الهدف ${fmt(emTarget)} (${p.emergencyMonths} شهور × متوسط مصروفك ${fmt(avgExp)}). خليه سيولة سهلة السحب.`,
+           'إزاي أكمّل صندوق الطوارئ بأسرع طريقة من غير ما أضغط على مصاريفي؟');
+
+    if(sr.rate!=null && sr.rate*100 < p.savingsRatePct-0.5){
+      const extra=(p.savingsRatePct/100 - sr.rate)*sr.avgIncome;
+      step(2, `معدل ادخارك ${Math.round(sr.rate*100)}% والمستهدف ${p.savingsRatePct}%. محتاج تدّخر حوالي ${fmt(extra)} زيادة كل شهر.`,
+           `معدل ادخاري ${Math.round(sr.rate*100)}% وعايز أوصل ${p.savingsRatePct}%. أوفّر منين؟`);
+    } else if(sr.rate==null) step(1,'سجّل دخلك وادخارك كام شهر عشان أقيس معدل ادخارك الفعلي.', null);
+
+    // سيولة زيادة فوق الطوارئ ⇒ توزيع يسدّ العجز عن النِّسب المستهدفة
+    const minExcess = Math.max(avgExp ? 0.5*avgExp : 0, 0.05*longTotal, 1000);
+    if(out.emergency && out.emergency.done && excess>=minExcess){
+      const deficits=out.allocation.map(a=>({ ...a, need:Math.max(0, a.target/100*longTotal - a.value) }));
+      const totalNeed=deficits.reduce((t,d)=>t+d.need,0)||1;
+      const parts=deficits.filter(d=>d.need>0).map(d=>`${d.label} ${fmt(Math.round(excess*d.need/totalNeed))}`);
+      if(parts.length) step(2, `عندك سيولة ${fmt(excess)} زيادة عن صندوق الطوارئ. حسب خطتك توزيعها: ${parts.join('، ')}.`,
+                            `عندي سيولة ${fmt(Math.round(excess))} زيادة عن صندوق الطوارئ. اشرحلي توزيعها حسب خطتي وأبدأ إزاي؟`);
+    }
+    // انحراف كبير عن التوزيع ⇒ توجيه الادخار الجديد (بدون بيع)
+    if(longTotal>0 && out.emergency && out.emergency.done){
+      for(const a of out.allocation){
+        if(a.pct - a.target > 10) step(1, `${a.label} ${Math.round(a.pct)}% والمستهدف ${a.target}%. وجّه ادخارك الجاي للأوعية الأقل بدل ما تزوّده.`, null);
+      }
+    }
+    for(const x of WE.stalePrices().slice(0,3))
+      step(1, `حدّث سعر "${x.a.name}"${x.days!=null?` (آخر تحديث من ${x.days} يوم)`:''} عشان ثروتك تتحسب صح.`, null);
+    out.steps.sort((a,b)=>b.sev-a.sev);
+    return out;
+  },
+  /** ملخص للمساعد — نفس أرقام الشاشة */
+  forAI(){
+    const st=this.status(), s=st.snapshot, p=this.get();
+    return {
+      currency:'EGP', net_worth:Math.round(s.net), buckets:Object.fromEntries(Object.entries(s.buckets).map(([k,v])=>[k,Math.round(v)])),
+      history:WE.history().slice(-6).map(h=>({ month:h.month, net:h.net })),
+      plan: p ? { emergency_months:p.emergencyMonths, savings_rate_target_pct:p.savingsRatePct, allocation_target_pct:p.allocation, answers:p.answers } : null,
+      emergency: st.emergency ? { target:Math.round(st.emergency.target||0), have:Math.round(st.emergency.have), months_covered: st.emergency.months!=null ? +st.emergency.months.toFixed(1) : null, done:st.emergency.done } : null,
+      savings_rate_actual_pct: st.savings.rate!=null ? Math.round(st.savings.rate*100) : null,
+      allocation_actual_pct: st.allocation ? Object.fromEntries(st.allocation.map(a=>[a.key, Math.round(a.pct)])) : null,
+      excess_liquid: Math.round(st.excessLiquid||0),
+      next_steps: st.steps.map(x=>x.text),
+      rules:'قواعد عامة معلنة في التطبيق، ليست نصيحة استثمار مرخّصة. لا ترشيح لأسهم أو صناديق بعينها. القرار للمستخدم.'
+    };
+  }
+};
+
+// ── واجهة "ثروتي" ──
+let _planDraft=null;     // مقابلة الخطة الجارية (في الذاكرة فقط حتى الحفظ)
+function renderWealth(){
+  try{ WE.recordSnapshot(); }catch(e){}
+  renderWealthCard(); renderPlanCard();
+}
+function renderWealthCard(){
+  const el=document.getElementById('wealthCard'); if(!el) return;
+  const s=WE.snapshot(), hist=WE.history();
+  const tot=Object.values(s.buckets).reduce((a,b)=>a+Math.max(0,b),0)||1;
+  const rows=Object.entries(WEALTH_BUCKETS).filter(([k])=>s.buckets[k]>0 || k==='liquid').map(([k,b])=>{
+    const v=s.buckets[k], pct=Math.round(Math.max(0,v)/tot*100);
+    return `<div class="wl-row"><span>${b.icon}</span><div class="wl-l">${b.label}<div class="wl-bar"><i style="width:${pct}%"></i></div></div><span class="wl-v">${fmt(v)}</span></div>`;
+  }).join('');
+  const extra=[];
+  if(s.receivables>0) extra.push(`<div class="wl-row"><span>🤝</span><div class="wl-l">فلوس ليك عند الناس</div><span class="wl-v">${fmt(s.receivables)}</span></div>`);
+  if(s.liabilities>0) extra.push(`<div class="wl-row"><span>📕</span><div class="wl-l">التزامات (ديون وبطاقات)</div><span class="wl-v" style="color:var(--coral)">−${fmt(s.liabilities)}</span></div>`);
+  const h=hist.slice(-6);
+  const histHtml = h.length>1 ? `<div class="card-title" style="margin-top:14px"><div class="card-title-icon">📈</div>صافي الثروة شهرياً</div>`+
+    h.map((x,i)=>{ const d=i? x.net-h[i-1].net : null;
+      return `<div class="wl-row"><div class="wl-l">${monthLabelOf(x.month)}</div><span class="wl-v">${fmt(x.net)}</span>${d==null?'':`<span class="wl-tgt" style="color:${d>=0?'var(--mint)':'var(--coral)'};min-width:70px;text-align:left">${d>=0?'+':'−'}${fmt(Math.abs(d))}</span>`}</div>`; }).join('')
+    : `<div class="wl-why">التطبيق هيسجّل صافي ثروتك كل شهر من النهارده، وتشوف هنا هي بتكبر بأي سرعة.</div>`;
+  el.innerHTML=`<div class="card-title"><div class="card-title-icon">💼</div>صافي ثروتك</div>
+    <div class="wl-net">${fmt(s.net)} <span style="font-size:13px;color:var(--muted)">جنيه</span></div>
+    <div class="wl-sub">الأصول ${fmt(s.assets)} − الالتزامات ${fmt(s.liabilities)}</div>
+    <div style="margin-top:10px">${rows}${extra.join('')}</div>
+    <div class="wl-why">الذهب والشهادات والصناديق بتتضاف من الإعدادات ← الأصول. اللي بتدّخره وبتحوّله لشهادة أو ذهب سجّله كأصل عشان يظهر هنا.</div>
+    ${histHtml}`;
+}
+function renderPlanCard(){
+  const el=document.getElementById('planCard'); if(!el) return;
+  if(_planDraft){ el.innerHTML=planWizardHtml(); return; }
+  const p=PE.get();
+  if(!p){
+    el.innerHTML=`<div class="card-title"><div class="card-title-icon">🧭</div>دستورك المالي</div>
+      <div class="wl-sub" style="font-size:13px">٤ أسئلة قصيرة، وبعدها التطبيق يقترح: صندوق طوارئ كام شهر، تدّخر كام في المية، وتوزّع فلوسك طويلة الأجل إزاي. تراجع الأرقام وتعدّلها قبل الحفظ.</div>
+      <button class="btn btn-primary" style="margin-top:12px" onclick="startPlanWizard()">🧭 ابدأ</button>`;
+    return;
+  }
+  const st=PE.status();
+  const em=st.emergency;
+  const emHtml = em && em.target!=null
+    ? `<div class="wl-row"><span>🛟</span><div class="wl-l">صندوق الطوارئ · ${em.months.toFixed(1)} من ${p.emergencyMonths} شهور
+         <div class="wl-bar"><i style="width:${Math.min(100,Math.round(em.have/em.target*100))}%"></i></div></div>
+         <span class="wl-v">${em.done?'✅':fmt(em.gap)}</span></div>`
+    : `<div class="wl-row"><span>🛟</span><div class="wl-l">صندوق الطوارئ · ${p.emergencyMonths} شهور — محتاج مصاريف مسجّلة للحساب</div></div>`;
+  const srA=st.savings.rate;
+  const srHtml=`<div class="wl-row"><span>💰</span><div class="wl-l">معدل الادخار <span class="wl-tgt">· المستهدف ${p.savingsRatePct}%</span>
+      <div class="wl-bar"><i style="width:${srA==null?0:Math.min(100,Math.round(srA*100/Math.max(1,p.savingsRatePct)*100))}%"></i></div></div>
+      <span class="wl-v">${srA==null?'—':Math.round(srA*100)+'%'}</span></div>`;
+  const alHtml=st.allocation.map(a=>`<div class="wl-row"><span>${a.icon}</span><div class="wl-l">${a.label} <span class="wl-tgt">· المستهدف ${a.target}%</span>
+      <div class="wl-bar"><i style="width:${Math.min(100,Math.round(a.pct))}%"></i></div></div><span class="wl-v">${Math.round(a.pct)}%</span></div>`).join('');
+  const steps=st.steps.length ? st.steps.map((x,i)=>`<div class="wl-step"><span class="wl-n">${i+1}</span><span style="flex:1">${esc(x.text)}</span>
+      ${x.ask?`<button class="al-btn" onclick="askAssistant('${escJs(x.ask)}')" aria-label="اسأل المساعد">🤖</button>`:''}</div>`).join('')
+    : `<div class="wl-why" style="font-size:13px">✅ ماشي على خطتك. مفيش خطوة مطلوبة دلوقتي.</div>`;
+  el.innerHTML=`<div class="card-title"><div class="card-title-icon">🧭</div>خطتك</div>
+    ${emHtml}${srHtml}
+    <div class="card-title" style="margin-top:14px"><div class="card-title-icon">🧩</div>توزيع الفلوس طويلة الأجل</div>
+    ${alHtml}
+    ${st.excessLiquid>0&&st.longTotal>0?`<div class="wl-row"><span>💵</span><div class="wl-l">سيولة زيادة عن الطوارئ <span class="wl-tgt">· المستهدف 0% (توزَّع)</span>
+      <div class="wl-bar"><i style="width:${Math.min(100,Math.round(st.excessLiquid/st.longTotal*100))}%;background:var(--amber)"></i></div></div>
+      <span class="wl-v">${Math.round(st.excessLiquid/st.longTotal*100)}%</span></div>`:''}
+    <div class="card-title" style="margin-top:14px"><div class="card-title-icon">👣</div>الخطوة الجاية</div>
+    ${steps}
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center" onclick="askAssistant('راجع خطتي المالية في شاشة ثروتي واشرحلي أنا فين منها وإيه أهم حاجة أعملها الشهر ده')">🤖 راجع خطتي</button>
+      <button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center" onclick="startPlanWizard(true)">✏️ تعديل الخطة</button>
+    </div>
+    <div class="wl-why">اقتراحات حسابية بقواعد عامة معلنة، مش نصيحة استثمار مرخّصة، ومفيش حاجة بتتنفّذ من غير موافقتك. القرار ليك.</div>`;
+}
+const PLAN_QS=[
+  { k:'income',   q:'دخلك عامل إزاي؟',               o:[['stable','ثابت (مرتب)'],['variable','متغيّر (عيادة/عمل حر)']] },
+  { k:'dependents',q:'فيه حد بتصرف عليه؟',            o:[[true,'أيوه'],[false,'لأ']] },
+  { k:'horizon',  q:'الفلوس اللي بتدّخرها هتحتاجها إمتى غالباً؟', o:[['short','أقل من 3 سنين'],['medium','3 لـ 7 سنين'],['long','أكتر من 7 سنين']] },
+  { k:'risk',     q:'لو قيمة جزء من فلوسك نزلت 20% في سنة، هتعمل إيه؟', o:[['low','أقلق وأبيع'],['medium','أستحمل وأستنى'],['high','أشتري زيادة']] }
+];
+function startPlanWizard(edit){
+  const p=PE.get();
+  _planDraft={ answers: edit && p && p.answers ? {...p.answers} : {}, rec:null };
+  if(edit && p) _planDraft.rec={ emergencyMonths:p.emergencyMonths, savingsRatePct:p.savingsRatePct, allocation:{...p.allocation}, why:[] };
+  renderPlanCard();
+}
+function planAnswer(k, v){
+  _planDraft.answers[k]=v;
+  if(PLAN_QS.every(q=>_planDraft.answers[q.k]!==undefined)) _planDraft.rec=PE.recommend(_planDraft.answers);
+  renderPlanCard();
+}
+function planWizardHtml(){
+  const A=_planDraft.answers;
+  const qs=PLAN_QS.map(q=>`<div class="wl-q"><div class="wl-qt">${q.q}</div><div class="wl-opts">${
+    q.o.map(([v,l])=>`<button class="acc-chip${A[q.k]===v?' active':''}" onclick='planAnswer(${JSON.stringify(q.k)}, ${JSON.stringify(v)})'>${l}</button>`).join('')}</div></div>`).join('');
+  const r=_planDraft.rec;
+  const recHtml = r ? `<div class="card-title" style="margin-top:6px"><div class="card-title-icon">💡</div>اقتراح التطبيق — عدّله لو حابب</div>
+    <div class="wl-inp">
+      <div class="form-row"><label>صندوق الطوارئ (شهور)</label><input type="number" id="plEm" min="1" max="24" value="${r.emergencyMonths}"></div>
+      <div class="form-row"><label>نسبة الادخار من الدخل %</label><input type="number" id="plSr" min="0" max="90" value="${r.savingsRatePct}"></div>
+      <div class="form-row"><label>📜 شهادات وودائع %</label><input type="number" id="plCert" min="0" max="100" value="${r.allocation.cert}"></div>
+      <div class="form-row"><label>🥇 ذهب %</label><input type="number" id="plGold" min="0" max="100" value="${r.allocation.gold}"></div>
+      <div class="form-row"><label>📈 أسهم وصناديق %</label><input type="number" id="plEq" min="0" max="100" value="${r.allocation.equity}"></div>
+    </div>
+    ${r.why && r.why.length ? `<div class="wl-why">ليه؟<br>${r.why.filter(Boolean).map(w=>'• '+esc(w)).join('<br>')}</div>`:''}
+    <div class="wl-why">قواعد عامة معلنة، مش نصيحة استثمار مرخّصة.</div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-primary" style="flex:2" onclick="savePlan()">💾 احفظ خطتي</button>
+      <button class="btn btn-ghost" style="flex:1" onclick="_planDraft=null;renderPlanCard()">إلغاء</button>
+    </div>` : `<button class="btn btn-ghost" onclick="_planDraft=null;renderPlanCard()">إلغاء</button>`;
+  return `<div class="card-title"><div class="card-title-icon">🧭</div>دستورك المالي</div>${qs}${recHtml}`;
+}
+function savePlan(){
+  if(!_planDraft || !_planDraft.rec) return false;
+  const num=(id)=>Number(document.getElementById(id)?.value);
+  const p={ v:1, answers:{..._planDraft.answers}, emergencyMonths:num('plEm'), savingsRatePct:num('plSr'),
+            allocation:{ cert:num('plCert'), gold:num('plGold'), equity:num('plEq') },
+            createdAt:(PE.get()&&PE.get().createdAt)||new Date().toISOString(), updatedAt:new Date().toISOString() };
+  const err=PE.validate(p);
+  if(err){ toast(err,'error'); return false; }
+  const prev=data.plan;
+  data.plan=p;
+  if(!save()){ data.plan=prev; toast('لم تُحفظ الخطة — تعذّر الحفظ على الجهاز','error'); return false; }
+  _planDraft=null; renderWealth();
+  toast('اتحفظت خطتك ✅ '+cloudStatusText());
+  return true;
+}
+
 function smartAlerts(){
   const out=[], mo=cur_month(), today=today_str();
   const add=(id,sev,icon,text,ask)=>out.push({id,sev,icon,text,ask});
@@ -10730,6 +11064,17 @@ function smartAlerts(){
     const f=Q.monthForecast(mo);
     if(f.isCurrent && f.inc>0 && f.projectedNet<0)
       add(`fc:${mo}`,2,'📉',`بالمعدّل ده الشهر هيخلص بعجز ${fmt(Math.abs(f.projectedNet))}`,'إزاي أقلّل مصاريفي باقي الشهر؟');
+  }catch(e){}
+  // مدير الثروة: أهم خطوة في الخطة (أو دعوة لعملها) + أسعار أصول قديمة
+  try{
+    if(PE.get()){
+      const st=PE.status(), top=st.steps[0];
+      if(top && top.sev>=2) add(`plan:${mo}:${top.text.slice(0,24)}`, 1, '🧭', top.text, top.ask);
+    } else if(Repo.tx().length>=20){
+      add('plan-none', 1, '🧭', 'اعمل دستورك المالي (٤ أسئلة) عشان التطبيق يقولك تدّخر وتوزّع فلوسك إزاي — تحليل ← ثروتي', null);
+    }
+    for(const x of WE.stalePrices().slice(0,1))
+      add(`stale:${x.a.id}:${mo}`, 1, '🏷️', `حدّث سعر "${x.a.name}" عشان ثروتك تتحسب صح`, null);
   }catch(e){}
   const dis=proState().dismissed;
   return out.filter(a=>!dis[a.id]).sort((a,b)=>b.sev-a.sev).slice(0,4);
