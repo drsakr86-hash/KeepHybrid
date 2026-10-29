@@ -1098,6 +1098,11 @@ body.ai-open .toast{bottom:150px}
 .wl-step .wl-n{flex-shrink:0;width:22px;height:22px;border-radius:50%;background:rgba(0,229,190,.14);color:var(--mint);font-size:11px;font-weight:900;display:flex;align-items:center;justify-content:center;margin-top:1px}
 .wl-why{font-size:11.5px;color:var(--muted);line-height:1.8;margin-top:8px}
 .wl-inp{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
+.sp-line{display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px solid var(--border);font-size:13px}
+.sp-line input[type=number]{width:110px;background:var(--surface);border:1.5px solid var(--border);color:var(--text);font-family:var(--font);font-size:14px;padding:8px 10px;border-radius:10px}
+.sp-line input[type=checkbox]{width:20px;height:20px;accent-color:var(--mint);flex-shrink:0}
+.sp-line .wl-l small{display:block;font-size:11px;color:var(--muted);line-height:1.6}
+.sp-free{display:flex;justify-content:space-between;font-weight:900;padding:12px 0 4px;font-size:14px}
 
 .al-txt{flex:1;min-width:0}
 .al-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;min-width:32px;min-height:32px;cursor:pointer;flex-shrink:0;font-size:13px}
@@ -2500,6 +2505,18 @@ body.ai-open .toast{bottom:150px}
     </div>
     <div id="apPreview" style="text-align:center;font-size:13px;font-weight:800;margin-bottom:16px;min-height:20px"></div>
     <button class="qadd-submit" onclick="submitAssetPrice()">💾 حفظ السعر</button>
+  </div>
+</div>
+
+<!-- INCOME SPLIT SHEET (مدير الثروة — المرحلة 3) -->
+<div class="qadd-overlay" id="splitOverlay" onclick="closeSplit(event)">
+  <div class="qadd-sheet" onclick="event.stopPropagation()">
+    <div class="qadd-handle"></div>
+    <div class="qadd-title-row">
+      <span class="qadd-title">➗ تقسيم الدخل</span>
+      <button class="qadd-close" onclick="closeSplit()">✕</button>
+    </div>
+    <div id="splitBody"></div>
   </div>
 </div>
 
@@ -7283,6 +7300,7 @@ function submitQadd(){
   const labels={Income:'💰 دخل',Expense:'💸 مصروف',Saving:'💎 ادخار',Charity:'🌱 صدقة'};
   toast(labels[_qaddType]+' · '+fmt(amt)+' EGP');
   notifyBudget(_qaddType, cat, date);
+  if(_qaddType===TX.INCOME && _newTx && _newTx.id && PE.get() && _lastSaveOk) setTimeout(()=>openSplit(_newTx.id), 450);
 }
 
 // ── Category dropdown ──
@@ -10249,6 +10267,7 @@ function aiExec(name, a){
         refreshUI(); aiAct(rec);
         const b = type===TX.EXPENSE ? BE.status(cat, date.slice(0,7)) : null;
         return { ok:true, ...aiPersistInfo(), id:rec.id, type, amount:amt, category:cat, date, account:(accountById(accId)||{}).name,
+                 ...(type===TX.INCOME && PE.get() ? { split_hint:'قول للمستخدم إن الدخل ده مستني تقسيم حسب خطته من التنبيه ➗ أو شاشة ثروتي.' } : {}),
                  budget: b && b.limit ? { limit:b.limit, spent:b.spent, remaining:b.remaining, status:BE.STATUS_LABEL[b.status] } : null };
       }
       case 'find_transactions': {
@@ -10858,9 +10877,16 @@ const PE = {
     const step=(sev,text,ask)=>out.steps.push({sev,text,ask});
     const liquid=s.buckets.liquid;
     const emTarget = avgExp ? p.emergencyMonths*avgExp : null;
-    out.emergency = { target:emTarget, have:liquid, months: avgExp ? liquid/avgExp : null,
-                      gap: emTarget!=null ? Math.max(0, emTarget-liquid) : null, done: emTarget!=null && liquid>=emTarget };
-    const excess = emTarget!=null ? Math.max(0, liquid-emTarget) : 0;
+    // لو فيه حساب توفير: هو صندوق الطوارئ (التحويل له يُحسب). غير كده: كل السيولة.
+    const savAccs=FE.accountRows().filter(r=>r.type==='savings');
+    const savBal=savAccs.reduce((t,r)=>t+Math.max(0,r.balance),0);
+    const have = savAccs.length ? savBal : liquid;
+    out.emergency = { target:emTarget, have, months: avgExp ? have/avgExp : null, inSavingsAccount: savAccs.length>0,
+                      gap: emTarget!=null ? Math.max(0, emTarget-have) : null, done: emTarget!=null && have>=emTarget };
+    // السيولة الزيادة: بحساب توفير ⇒ (الحسابات الجارية بعد مصروف شهر) + (التوفير فوق الهدف)
+    const excess = emTarget==null ? 0 : savAccs.length
+      ? Math.max(0, (liquid-savBal) - avgExp) + Math.max(0, savBal-emTarget)
+      : Math.max(0, liquid-emTarget);
     const longTotal = PLAN_BUCKETS.reduce((t,k)=>t+s.buckets[k],0) + excess;
     out.allocation = PLAN_BUCKETS.map(k=>({ key:k, label:WEALTH_BUCKETS[k].label, icon:WEALTH_BUCKETS[k].icon,
       value:s.buckets[k], pct: longTotal>0 ? s.buckets[k]/longTotal*100 : 0, target:Number(p.allocation[k])||0 }));
@@ -10868,7 +10894,7 @@ const PE = {
 
     if(!avgExp) step(2,'سجّل مصاريفك شهر على الأقل عشان أقدر أحسب صندوق الطوارئ المطلوب.', null);
     else if(!out.emergency.done)
-      step(3, `كمّل صندوق الطوارئ: ناقص ${fmt(out.emergency.gap)} جنيه. الهدف ${fmt(emTarget)} (${p.emergencyMonths} شهور × متوسط مصروفك ${fmt(avgExp)}). خليه سيولة سهلة السحب.`,
+      step(3, `كمّل صندوق الطوارئ: ناقص ${fmt(out.emergency.gap)} جنيه. الهدف ${fmt(emTarget)} (${p.emergencyMonths} شهور × متوسط مصروفك ${fmt(avgExp)}). ${savAccs.length?'حوّله لحساب التوفير.':'الأفضل تفتح له حساب توفير منفصل (ابدأ بتقسيم الدخل وهو يعمله).'}`,
            'إزاي أكمّل صندوق الطوارئ بأسرع طريقة من غير ما أضغط على مصاريفي؟');
 
     if(sr.rate!=null && sr.rate*100 < p.savingsRatePct-0.5){
@@ -10909,10 +10935,199 @@ const PE = {
       allocation_actual_pct: st.allocation ? Object.fromEntries(st.allocation.map(a=>[a.key, Math.round(a.pct)])) : null,
       excess_liquid: Math.round(st.excessLiquid||0),
       next_steps: st.steps.map(x=>x.text),
+      income_waiting_split: IE.pending().slice(0,5).map(t=>({ id:t.id, amount:t.amount, category:t.category, date:t.date })),
+      split_how:'التقسيم يتنفّذ من المستخدم بنفسه: شاشة ثروتي ← "قسّمه"، أو تنبيه ➗ في الرئيسية. المساعد لا ينفّذه.',
       rules:'قواعد عامة معلنة في التطبيق، ليست نصيحة استثمار مرخّصة. لا ترشيح لأسهم أو صناديق بعينها. القرار للمستخدم.'
     };
   }
 };
+
+// ══════════════════════════════════════════════════════════
+// المرحلة 3 — تقسيم الدخل (IE)
+// ──────────────────────────────────────────────────────────
+// عند دخول دخل: التزامات باقي الشهر (للعلم، تبقى في الحساب) ← ادخار
+// بنسبة الخطة يُوزَّع: صندوق الطوارئ (تحويل لحساب توفير فيبقى سيولة)
+// ← الأهداف ذات الموعد (ادخار مربوط بالهدف) ← الاستثمار حسب عجز
+// التوزيع (ادخار بفئة الوعاء) ← والباقي مصروف حر.
+// لا شيء يُنفَّذ إلا بموافقة، والتنفيذ حفظ واحد ذرّي (كله أو لا شيء).
+// ══════════════════════════════════════════════════════════
+const SPLIT_LOG_MAX = 300;
+const SPLIT_CAT = { cert:'شهادات وودائع', gold:'ذهب', equity:'أسهم وصناديق' };
+const IE = {
+  log(){ return Array.isArray(data.splitLog) ? data.splitLog : []; },
+  handled(txId){ return this.log().some(x=>x && x.txId===txId); },
+  /** دخل الشهر الحالي والسابق المسجَّل بعد إنشاء الخطة ولم يُقسَّم أو يُتخطَّ */
+  pending(){
+    const p=PE.get(); if(!p) return [];
+    const months=new Set(Q.lastMonths(2));
+    const since=p.createdAt||'';
+    return Repo.tx().filter(t=>t.type===TX.INCOME && months.has((t.date||'').slice(0,7))
+      && (t.createdAt||t.date||'') >= since && !this.handled(t.id))
+      .sort((a,b)=> a.date<b.date ? 1 : -1);
+  },
+  savingsAccount(){ return activeAccounts().find(a=>a.type==='savings') || null; },
+  /** التزامات باقي الشهر الحالي (متكررة/اشتراكات/أقساط) */
+  obligations(){
+    const end=Q.monthEnd(cur_month()), today=today_str();
+    const days=Math.max(1, Math.round((new Date(end+'T00:00:00')-new Date(today+'T00:00:00'))/86400000)+1);
+    return Upcoming.items(days).filter(i=>i.flow==='out' && i.date<=end && i.amount>0);
+  },
+  propose(tx){
+    const p=PE.get(); if(!p || !tx) return null;
+    const amount=FE.amountOf(tx), st=PE.status(), why=[];
+    const oblItems=this.obligations();
+    const obl=oblItems.reduce((t,i)=>t+i.amount,0);
+    const saveTarget=Math.round(amount*p.savingsRatePct/100);
+    const room=Math.max(0, amount-obl);
+    let left=Math.min(saveTarget, room);
+    why.push(`الادخار ${p.savingsRatePct}% من الدخل = ${fmt(saveTarget)}`);
+    if(left<saveTarget) why.push(`التزامات باقي الشهر ${fmt(obl)} ⇒ المتاح للادخار ${fmt(left)} بس`);
+    const lines=[];
+    const add=(l)=>{ if(l.amount>0){ lines.push(l); left-=l.amount; } };
+    // 1) صندوق الطوارئ
+    if(st.emergency && st.emergency.gap>0 && left>0){
+      const acc=this.savingsAccount();
+      add({ kind:'emergency', label:'🛟 صندوق الطوارئ', amount:Math.min(left, Math.ceil(st.emergency.gap)),
+            note: acc ? `تحويل لـ "${acc.name}" — يفضل سيولة` : 'تحويل لحساب توفير جديد "صندوق الطوارئ" — يفضل سيولة' });
+      why.push(`صندوق الطوارئ ناقص ${fmt(st.emergency.gap)} ⇒ له الأولوية`);
+    }
+    // 2) أهداف لها موعد
+    for(const g of Q.goalsOverview().rows){
+      if(left<=0) break;
+      if(g.done || !(g.requiredMonthly>0)) continue;
+      const mo=cur_month();
+      const already=Q.goalTx(g.id).filter(t=>(t.date||'').startsWith(mo)).reduce((t,x)=>t+FE.amountOf(x),0);
+      const need=Math.max(0, g.requiredMonthly-already);
+      if(need>0) add({ kind:'goal', goalId:g.id, label:'🎯 '+(g.name||'هدف'), amount:Math.min(left, need), note:`المطلوب ${fmt(g.requiredMonthly)} شهرياً للوصول في موعده` });
+    }
+    // 3) الاستثمار حسب عجز التوزيع
+    if(left>0){
+      const al=st.allocation||[], total=(st.longTotal||0)+left;
+      let need=al.map(a=>({ key:a.key, need:Math.max(0, a.target/100*total - a.value) }));
+      let sum=need.reduce((t,x)=>t+x.need,0);
+      if(sum<=0){ need=al.map(a=>({ key:a.key, need:a.target })); sum=need.reduce((t,x)=>t+x.need,0)||1; }
+      let rest=left;
+      const parts=need.filter(x=>x.need>0).map((x,i,arr)=>{
+        const v = i===arr.length-1 ? rest : Math.round(left*x.need/sum); rest-=v; return { key:x.key, v };
+      });
+      for(const x of parts) add({ kind:'invest', bucket:x.key, label:WEALTH_BUCKETS[x.key].icon+' '+SPLIT_CAT[x.key], amount:x.v,
+                                 note:'يتسجّل ادخار — ولما تشتري سجّله كأصل' });
+      why.push('الاستثمار موزّع على الأوعية الأبعد عن نسبتها في خطتك');
+    }
+    const saved=lines.reduce((t,l)=>t+l.amount,0);
+    return { txId:tx.id, amount, date:tx.date, category:tx.category, accountId:tx.accountId,
+             obl, oblItems, saveTarget, lines, free:amount-obl-saved, why };
+  },
+  /** تنفيذ ذرّي: كل السجلات + السجل في حفظ واحد، وإلا يرجع كل شيء */
+  execute(prop, chosen){
+    if(!prop || this.handled(prop.txId)) return { ok:false, error:'الدخل ده اتقسّم قبل كده' };
+    const src=accountById(prop.accountId) ? prop.accountId : defaultAccountId();
+    const now=new Date().toISOString(), date=today_str();
+    const snap={ tx:data.transactions.length, accounts:(data.accounts||[]).length, log:data.splitLog };
+    const made=[];
+    const rec=(o)=>{ const r={ id:uid(), createdAt:now, updatedAt:now, version:1, accountId:src, date, description:'تقسيم دخل '+fmt(prop.amount), tags:['plan'], ...o };
+                     data.transactions.push(r); made.push(r); return r; };
+    try{
+      for(const l of chosen){
+        const amt=Math.round(Number(l.amount)*100)/100;
+        if(!(amt>0) || !isFinite(amt)) continue;
+        if(l.kind==='emergency'){
+          let acc=this.savingsAccount();
+          if(!acc){ acc={ id:uid(), name:'صندوق الطوارئ', type:'savings', openingBalance:0, createdAt:now, updatedAt:now, version:1 }; data.accounts.push(acc); }
+          if(acc.id===src) continue;                               // الدخل نزل أصلاً في حساب التوفير
+          rec({ type:TX.TRANSFER, category:'تحويل', amount:amt, toAccountId:acc.id, description:'صندوق الطوارئ — تقسيم دخل' });
+        } else if(l.kind==='goal'){
+          const g=Repo.goals().find(x=>x.id===l.goalId);
+          rec({ type:TX.SAVING, category:g ? g.name : 'هدف', amount:amt, goalId:l.goalId });
+        } else if(l.kind==='invest'){
+          rec({ type:TX.SAVING, category:SPLIT_CAT[l.bucket]||'استثمار', amount:amt });
+        }
+      }
+      const entry={ id:uid(), txId:prop.txId, at:now, amount:prop.amount,
+                    lines:made.map(r=>({ type:r.type, category:r.category, amount:r.amount, txId:r.id })) };
+      data.splitLog=[...this.log(), entry].slice(-SPLIT_LOG_MAX);
+      if(!save()) throw new Error('save-failed');
+      return { ok:true, entry };
+    }catch(e){
+      data.transactions.length=snap.tx; data.accounts.length=snap.accounts; data.splitLog=snap.log;
+      bumpDataVersion();
+      return { ok:false, error:'تعذّر الحفظ على الجهاز — ما اتسجّلش أي حاجة' };
+    }
+  },
+  skip(txId){
+    if(this.handled(txId)) return true;
+    const prev=data.splitLog;
+    data.splitLog=[...this.log(), { id:uid(), txId, at:new Date().toISOString(), skipped:true }].slice(-SPLIT_LOG_MAX);
+    if(!save()){ data.splitLog=prev; return false; }
+    return true;
+  }
+};
+
+// ── شاشة التقسيم ──
+let _split=null;
+function openSplit(txId){
+  const tx=Repo.tx().find(t=>t.id===txId);
+  if(!PE.get()){ toast('اعمل خطتك الأول من تحليل ← ثروتي','info'); return; }
+  if(!tx || IE.handled(txId)){ toast('الدخل ده اتقسّم قبل كده','info'); return; }
+  _split=IE.propose(tx); renderSplit();
+  document.getElementById('splitOverlay').classList.add('open');
+  document.body.style.overflow='hidden';
+}
+function closeSplit(e){
+  if(e && e.target && e.target.id!=='splitOverlay') return;
+  document.getElementById('splitOverlay').classList.remove('open');
+  document.body.style.overflow=''; _split=null;
+}
+function splitChosen(){
+  if(!_split) return [];
+  return _split.lines.map((l,i)=>({ ...l,
+    on: document.getElementById('spOn'+i) ? document.getElementById('spOn'+i).checked : true,
+    amount: document.getElementById('spAmt'+i) ? Number(document.getElementById('spAmt'+i).value) : l.amount })).filter(l=>l.on);
+}
+function splitRecalc(){
+  if(!_split) return;
+  const used=splitChosen().reduce((t,l)=>t+(Number(l.amount)>0?Number(l.amount):0),0);
+  const free=_split.amount-_split.obl-used;
+  const el=document.getElementById('spFree');
+  if(el){ el.textContent=(free<0?'−':'')+fmt(Math.abs(free)); el.style.color=free<0?'var(--coral)':'var(--mint)'; }
+}
+function renderSplit(){
+  const el=document.getElementById('splitBody'); if(!el || !_split) return;
+  const sp=_split;
+  const obl = sp.obl>0 ? `<div class="sp-line"><span>📌</span><div class="wl-l">التزامات باقي الشهر<small>${sp.oblItems.slice(0,4).map(i=>esc(i.title)+' '+fmt(i.amount)).join(' · ')}${sp.oblItems.length>4?' …':''} — تفضل في حسابك</small></div><b>${fmt(sp.obl)}</b></div>` : '';
+  const lines = sp.lines.length ? sp.lines.map((l,i)=>`<div class="sp-line">
+      <input type="checkbox" id="spOn${i}" checked onchange="splitRecalc()">
+      <div class="wl-l">${esc(l.label)}<small>${esc(l.note||'')}</small></div>
+      <input type="number" id="spAmt${i}" value="${l.amount}" min="0" step="any" inputmode="decimal" oninput="splitRecalc()">
+    </div>`).join('')
+    : `<div class="wl-why" style="font-size:13px">${sp.saveTarget>0 ? 'مفيش مبلغ متاح للادخار من الدخل ده بعد الالتزامات.' : 'نسبة الادخار في خطتك 0%.'}</div>`;
+  el.innerHTML=`<div class="wl-sub" style="font-size:13px;margin-bottom:6px">دخل <b>${fmt(sp.amount)}</b> · ${esc(sp.category||'')} · ${esc(sp.date||'')}</div>
+    ${obl}${lines}
+    <div class="sp-free"><span>💸 مصروف حر للشهر</span><span id="spFree"></span></div>
+    <div class="wl-why">${sp.why.map(w=>'• '+esc(w)).join('<br>')}<br>الأرقام دي اقتراح حسب خطتك — عدّلها أو شيل علامة أي سطر. مفيش حاجة بتتسجّل غير لما تضغط نفّذ.</div>
+    ${sp.lines.length?`<button class="qadd-submit" style="margin-top:12px" onclick="confirmSplit()">✅ نفّذ التقسيم</button>`:''}
+    <button class="btn btn-ghost" style="margin-top:8px" onclick="skipSplit()">تخطّي الدخل ده</button>`;
+  splitRecalc();
+}
+function confirmSplit(){
+  if(!_split) return false;
+  const chosen=splitChosen();
+  if(chosen.some(l=>!(Number(l.amount)>=0) || !isFinite(Number(l.amount)))){ toast('في مبلغ مش صحيح','error'); return false; }
+  const r=IE.execute(_split, chosen);
+  if(!r.ok){ toast(r.error,'error'); return false; }
+  const n=r.entry.lines.length, tot=r.entry.lines.reduce((t,l)=>t+l.amount,0);
+  closeSplit(); refreshUI();
+  if(_analysisView==='wealth') renderWealth();
+  toast(`✅ اتقسّم: ${n} حركة بإجمالي ${fmt(tot)} — ${cloudStatusText()}`);
+  return true;
+}
+function skipSplit(){
+  if(!_split) return false;
+  if(!IE.skip(_split.txId)){ toast('تعذّر الحفظ','error'); return false; }
+  closeSplit(); refreshUI(); if(_analysisView==='wealth') renderWealth();
+  toast('تمام، مش هسألك عن الدخل ده تاني');
+  return true;
+}
 
 // ── واجهة "ثروتي" ──
 let _planDraft=null;     // مقابلة الخطة الجارية (في الذاكرة فقط حتى الحفظ)
@@ -10976,6 +11191,9 @@ function renderPlanCard(){
     ${st.excessLiquid>0&&st.longTotal>0?`<div class="wl-row"><span>💵</span><div class="wl-l">سيولة زيادة عن الطوارئ <span class="wl-tgt">· المستهدف 0% (توزَّع)</span>
       <div class="wl-bar"><i style="width:${Math.min(100,Math.round(st.excessLiquid/st.longTotal*100))}%;background:var(--amber)"></i></div></div>
       <span class="wl-v">${Math.round(st.excessLiquid/st.longTotal*100)}%</span></div>`:''}
+    ${(()=>{ const pend=IE.pending(); return pend.length ? `<div class="card-title" style="margin-top:14px"><div class="card-title-icon">➗</div>دخل محتاج تقسيم</div>`+
+      pend.slice(0,5).map(t=>`<div class="wl-row"><span>💰</span><div class="wl-l">${fmt(t.amount)} · ${esc(t.category||'')}<div class="wl-tgt">${esc(t.date||'')}</div></div>
+        <button class="btn btn-primary btn-sm" onclick="openSplit('${escJs(t.id)}')">قسّمه</button></div>`).join('') : ''; })()}
     <div class="card-title" style="margin-top:14px"><div class="card-title-icon">👣</div>الخطوة الجاية</div>
     ${steps}
     <div style="display:flex;gap:8px;margin-top:12px">
@@ -11040,7 +11258,7 @@ function savePlan(){
 
 function smartAlerts(){
   const out=[], mo=cur_month(), today=today_str();
-  const add=(id,sev,icon,text,ask)=>out.push({id,sev,icon,text,ask});
+  const add=(id,sev,icon,text,ask,act)=>out.push({id,sev,icon,text,ask,act});
   // ميزانيات
   try{
     for(const b of BE.overview(mo).rows){
@@ -11068,6 +11286,8 @@ function smartAlerts(){
   // مدير الثروة: أهم خطوة في الخطة (أو دعوة لعملها) + أسعار أصول قديمة
   try{
     if(PE.get()){
+      const pend=IE.pending()[0];
+      if(pend) add(`split:${pend.id}`, 2, '➗', `دخل ${fmt(pend.amount)} (${pend.category||''}) لسه ما اتقسمش حسب خطتك`, null, `openSplit('${escJs(pend.id)}')`);
       const st=PE.status(), top=st.steps[0];
       if(top && top.sev>=2) add(`plan:${mo}:${top.text.slice(0,24)}`, 1, '🧭', top.text, top.ask);
     } else if(Repo.tx().length>=20){
@@ -11090,6 +11310,7 @@ function renderAlertsCard(){
     list.map(a=>`<div class="al-row sev${a.sev}">
       <span class="al-ico">${a.icon}</span>
       <span class="al-txt">${esc(a.text)}</span>
+      ${a.act?`<button class="al-btn" onclick="${esc(a.act)}" aria-label="افتح">➗</button>`:''}
       ${a.ask?`<button class="al-btn" onclick="askAssistant('${escJs(a.ask)}')" aria-label="اسأل المساعد">🤖</button>`:''}
       <button class="al-btn" onclick="dismissAlert('${escJs(a.id)}')" aria-label="إخفاء">✕</button>
     </div>`).join('');
