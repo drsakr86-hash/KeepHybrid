@@ -2298,7 +2298,12 @@ body.ai-open .toast{bottom:150px}
           <div class="card-title"><div class="card-title-icon">📤</div>استيراد البيانات</div>
           <div style="font-size:12px;color:var(--muted);margin-bottom:14px">استعد بيانات من ملف JSON محفوظ مسبقاً</div>
           <button class="btn btn-ghost" onclick="document.getElementById('importFile').click()">📤 استيراد JSON</button>
-          <input type="file" id="importFile" aria-label="ملف الاستيراد" accept=".json" style="display:none" onchange="importData(event)">
+          <input type="file" id="importFile" aria-label="ملف الاستيراد" accept=".json,application/json,text/plain" style="display:none" onchange="importData(event)">
+          <button class="btn btn-ghost" style="margin-top:9px" onclick="toggleImportPaste()">📋 استيراد من نص منسوخ</button>
+          <div id="importPasteWrap" style="display:none;margin-top:9px">
+            <textarea id="importPaste" class="qadd-input" rows="5" placeholder="الصق هنا النسخة اللي نسختها" style="min-height:110px;font-size:12px;direction:ltr"></textarea>
+            <button class="btn btn-primary" style="margin-top:8px" onclick="importFromPaste()">✅ استيراد</button>
+          </div>
         </div>
         <div class="card">
           <div class="card-title"><div class="card-title-icon">🧮</div>تدقيق مالي</div>
@@ -2525,6 +2530,22 @@ body.ai-open .toast{bottom:150px}
     </div>
     <div id="apPreview" style="text-align:center;font-size:13px;font-weight:800;margin-bottom:16px;min-height:20px"></div>
     <button class="qadd-submit" onclick="submitAssetPrice()">💾 حفظ السعر</button>
+  </div>
+</div>
+
+<!-- EXPORT SHEET: التنزيل المباشر لا يعمل داخل WebView (Median) ⇒ مشاركة/نسخ كبدائل -->
+<div class="qadd-overlay" id="expOverlay" onclick="closeExport(event)">
+  <div class="qadd-sheet" onclick="event.stopPropagation()">
+    <div class="qadd-handle"></div>
+    <div class="qadd-title-row">
+      <span class="qadd-title">📥 نسخة احتياطية</span>
+      <button class="qadd-close" onclick="closeExport()">✕</button>
+    </div>
+    <div id="expInfo" class="wl-sub" style="font-size:13px;margin-bottom:12px"></div>
+    <button class="qadd-submit" id="expShareBtn" style="display:none;margin-bottom:9px" onclick="exportShare()">📤 مشاركة الملف (Drive / واتساب / الملفات)</button>
+    <button class="btn btn-ghost" style="margin-bottom:9px" onclick="exportDownload()">⬇️ تنزيل الملف</button>
+    <button class="btn btn-ghost" onclick="exportCopy()">📋 نسخ النسخة كنص</button>
+    <div class="wl-why">داخل تطبيق الموبايل ممكن "تنزيل" ما يشتغلش — استخدم المشاركة أو النسخ. بياناتك كمان محفوظة في حسابك على السحابة.</div>
   </div>
 </div>
 
@@ -11995,7 +12016,65 @@ document.addEventListener('input', e=>{
   if(e.target && e.target.id==='aiInput'){ const t=e.target; t.style.height='auto'; t.style.height=Math.min(110,t.scrollHeight)+'px'; }
 });
 
-function exportData(){ const blob=new Blob([JSON.stringify({...data,schemaVersion:SCHEMA_VERSION,exportedAt:new Date().toISOString()},null,2)],{type:'application/json'}); const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`keepMoney_local_${today_str()}.json`;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);toast('تم التصدير ✅'); }
+/**
+ * تصدير نسخة JSON. التنزيل عبر رابط blob لا يعمل داخل WebView تطبيقات الموبايل
+ * (Median) — كان يُظهر "تم التصدير" بلا ملف. الآن: نافذة بثلاث طرق، ولا ادّعاء نجاح
+ * إلا لما يكون للطريقة تأكيد (المشاركة/النسخ)؛ التنزيل يُقال عنه "بدأ" فقط.
+ */
+let _exp=null;
+function exportPayload(){
+  const json=JSON.stringify({...data,schemaVersion:SCHEMA_VERSION,exportedAt:new Date().toISOString()},null,2);
+  return { json, name:`keepMoney_${today_str()}.json` };
+}
+function exportData(){
+  _exp=exportPayload();
+  const n=(data.transactions||[]).length, kb=Math.max(1,Math.round(new Blob([_exp.json]).size/1024));
+  document.getElementById('expInfo').textContent=`${n} حركة · ${kb} KB · ${_exp.name}`;
+  let canFile=false;
+  try{ const f=new File([_exp.json], _exp.name, { type:'application/json' }); canFile=!!(navigator.canShare && navigator.canShare({ files:[f] })); }catch(e){}
+  document.getElementById('expShareBtn').style.display = canFile ? 'block' : 'none';
+  document.getElementById('expOverlay').classList.add('open');
+  document.body.style.overflow='hidden';
+}
+function closeExport(e){
+  if(e && e.target && e.target.id!=='expOverlay') return;
+  document.getElementById('expOverlay').classList.remove('open');
+  document.body.style.overflow='';
+}
+async function exportShare(){
+  if(!_exp) _exp=exportPayload();
+  try{
+    const f=new File([_exp.json], _exp.name, { type:'application/json' });
+    await navigator.share({ files:[f], title:'keepMoney — نسخة احتياطية' });
+    closeExport(); toast('اتبعتت النسخة ✅'); return true;
+  }catch(e){
+    if(e && e.name==='AbortError') return false;              // المستخدم قفل نافذة المشاركة
+    toast('المشاركة مش متاحة هنا — جرّب النسخ','error'); return false;
+  }
+}
+function exportDownload(){
+  if(!_exp) _exp=exportPayload();
+  try{
+    const url=URL.createObjectURL(new Blob([_exp.json],{type:'application/json'}));
+    const a=document.createElement('a'); a.href=url; a.download=_exp.name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 60000);           // الإلغاء الفوري كان يقطع التنزيل في بعض المتصفحات
+    toast('بدأ التنزيل — لو ما ظهرش الملف استخدم المشاركة أو النسخ','info');
+    return true;
+  }catch(e){ toast('التنزيل مش متاح هنا — استخدم النسخ','error'); return false; }
+}
+async function exportCopy(){
+  if(!_exp) _exp=exportPayload();
+  const txt=_exp.json;
+  try{ if(navigator.clipboard && window.isSecureContext){ await navigator.clipboard.writeText(txt); toast('اتنسخت النسخة ✅ الصقها في ملاحظة أو رسالة لنفسك'); return true; } }catch(e){}
+  try{
+    const ta=document.createElement('textarea'); ta.value=txt; ta.setAttribute('readonly','');
+    ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select();
+    const ok=document.execCommand('copy'); document.body.removeChild(ta);
+    if(ok){ toast('اتنسخت النسخة ✅ الصقها في ملاحظة أو رسالة لنفسك'); return true; }
+  }catch(e){}
+  toast('النسخ مش متاح على الجهاز ده','error'); return false;
+}
 /**
  * ══════════════════════════════════════════════════════════
  * خط الاستيراد (المرحلة 4)
@@ -12074,16 +12153,30 @@ async function importPipeline(text, opts){
 function importData(e){
   const file=e.target.files[0]; if(!file) return;
   const r=new FileReader();
-  r.onload=async ev=>{
-    const res=await importPipeline(String(ev.target.result));
+  r.onload=async ev=>{ await handleImportText(String(ev.target.result)); };
+  r.onerror=()=>toast('تعذّرت قراءة الملف','error');
+  r.readAsText(file); e.target.value='';
+}
+function toggleImportPaste(){ const w=document.getElementById('importPasteWrap'); if(w) w.style.display = w.style.display==='none' ? 'block' : 'none'; }
+async function importFromPaste(){
+  const ta=document.getElementById('importPaste'); const t=(ta && ta.value || '').trim();
+  if(!t){ toast('الصق النسخة الأول','error'); return false; }
+  const ok=await handleImportText(t);
+  if(ok && ta){ ta.value=''; toggleImportPaste(); }
+  return ok;
+}
+/** نفس خط الاستيراد للملف وللنص الملصوق */
+async function handleImportText(text){
+  {
+    const res=await importPipeline(text);
 
     if(!res.ok){
       alert('لم يتم الاستيراد — بياناتك الحالية لم تتغيّر.\n\n'+
             'فشل عند: '+res.failedAt+'\n\n'+ (res.errors||[]).join('\n'));
-      return;
+      return false;
     }
     if(res.futureSchema &&
-       !confirm(`الملف من نسخة أحدث من التطبيق. قد لا يفهم هذا الإصدار كل حقوله.\n\nمتابعة؟`)) return;
+       !confirm(`الملف من نسخة أحدث من التطبيق. قد لا يفهم هذا الإصدار كل حقوله.\n\nمتابعة؟`)) return false;
 
     const curN=(data.transactions||[]).length;
     const lines=[`سيتم استبدال بياناتك الحالية (${curN} حركة) بـ ${res.stats.validTransactions} حركة.`];
@@ -12091,11 +12184,9 @@ function importData(e){
     if(res.stats.reided)  lines.push(`• ${res.stats.reided} معرّف مكرّر أُعيد ترقيمه`);
     (res.warnings||[]).slice(0,4).forEach(w=>lines.push('• '+w));
     lines.push('', '🛟 ستُحفظ نسخة احتياطية من حالتك الحالية قبل الاستبدال — يمكنك التراجع من مركز النسخ.');
-    if(!confirm(lines.join('\n'))) return;
-    commitImport(res);
-  };
-  r.onerror=()=>toast('تعذّرت قراءة الملف','error');
-  r.readAsText(file); e.target.value='';
+    if(!confirm(lines.join('\n'))) return false;
+    return commitImport(res);
+  }
 }
 
 /** تنفيذ الاستيراد بعد موافقة المستخدم: نسخة احتياطية مؤكدة ← استبدال ← حفظ، أو لا شيء */
