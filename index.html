@@ -1643,6 +1643,7 @@ body.ai-open .toast{bottom:150px}
     <!-- ── VIEW: WEALTH (ثروتي + دستوري المالي) ── -->
     <div id="aview-wealth" style="display:none">
       <div class="card" id="wealthCard"></div>
+      <div class="card" id="incomeCard"></div>
       <div class="card" id="planCard"></div>
       <div class="card" id="reviewCard"></div>
       <div class="card" id="zakatCard"></div>
@@ -2364,6 +2365,22 @@ body.ai-open .toast{bottom:150px}
                autocomplete="off" oninput="filterQaddCats(this.value)" onfocus="openQaddCats()">
         <div class="qadd-cat-drop" id="qaddCatDrop"></div>
       </div>
+    </div>
+
+    <!-- Income source (income only) -->
+    <div class="qadd-field" id="qaddSrcField" style="display:none">
+      <label class="qadd-lbl">مصدر الدخل</label>
+      <div class="acc-chip-row" id="qaddSrcRow" style="flex-wrap:wrap"></div>
+      <div id="qaddCasesWrap" style="display:none;margin-top:9px">
+        <label class="qadd-lbl">عدد الحالات</label>
+        <input type="number" id="qaddCases" class="qadd-input" min="1" step="1" inputmode="numeric" placeholder="مثلاً 3">
+      </div>
+    </div>
+
+    <!-- Clinic expense (expense only) -->
+    <div class="qadd-field" id="qaddBizField" style="display:none">
+      <label class="qadd-lbl">المصروف ده على</label>
+      <div class="acc-chip-row" id="qaddBizRow"></div>
     </div>
 
     <!-- Goal (savings only) -->
@@ -3929,7 +3946,8 @@ const HE = {
   /** متوسط المصروف الشهري على آخر n شهراً فيها بيانات */
   avgMonthlyExpense(month, n){
     const months=Q.lastMonths(n||3, month||cur_month());
-    const vals=months.map(m=>Q.monthTotals(m).exp).filter(v=>v>0);
+    // مصاريف العيادات (bizId) ليست مصاريف شخصية — لا تدخل حساب الطوارئ
+    const vals=months.map(m=>SRC.personal(m).exp).filter(v=>v>0);
     if(!vals.length) return null;
     return vals.reduce((a,b)=>a+b,0)/vals.length;
   },
@@ -4884,6 +4902,9 @@ function addTransaction(payload){
   if(p.occId)    rec.occId    = p.occId;
   if(p.occDate)  rec.occDate  = p.occDate;
   if(p.instMonth)rec.instMonth= p.instMonth;
+  if(p.type===TX.INCOME && p.sourceId) rec.sourceId = String(p.sourceId);
+  if(p.type===TX.INCOME && Number(p.cases)>0) rec.cases = Math.round(Number(p.cases));
+  if(p.type===TX.EXPENSE && p.bizId) rec.bizId = String(p.bizId);
   if(p.id)       rec.id       = p.id;      // للاستيراد/التراجع فقط
 
   return TxRepo.add(rec);                  // حدث تغيير + createdAt + حفظ
@@ -7224,6 +7245,9 @@ function openQadd(presetType){
   _qaddAccId = _qaddAccId && accountById(_qaddAccId) ? _qaddAccId : defaultAccountId();
   renderAccChips('qaddAccRow', _qaddAccId, 'pickQaddAcc');
   renderQaddGoalChips();
+  _qaddSrcId=null; _qaddBizId=null;
+  const _cs=document.getElementById('qaddCases'); if(_cs) _cs.value='';
+  renderQaddSrc();
   setTimeout(()=>document.getElementById('qaddAmt').focus(),260);
 }
 
@@ -7246,6 +7270,7 @@ function setQaddType(t){
   if(tEl) tEl.textContent=titles[t]||'إضافة معاملة';
   buildQaddCats('');
   renderQaddGoalChips();
+  renderQaddSrc();
 }
 
 // ── Date helpers ──
@@ -7292,8 +7317,17 @@ function submitQadd(){
   const note = document.getElementById('qaddNote').value.trim();
   if(isNaN(amt)||amt<=0){ toast('أدخل مبلغاً صحيحاً','error'); document.getElementById('qaddAmt').focus(); return; }
   if(!cat){ toast('اختر الفئة','error'); document.getElementById('qaddCat').focus(); return; }
+  let _extra={};
+  if(_qaddType===TX.INCOME){
+    const sid=_qaddSrcId || (SRC.byName(cat)||{}).id || null;
+    const src=SRC.byId(sid);
+    if(sid) _extra.sourceId=sid;
+    const cs=Math.round(Number(document.getElementById('qaddCases')?.value));
+    if(src && src.cases && cs>0 && cs<1000) _extra.cases=cs;
+  }
+  if(_qaddType===TX.EXPENSE && _qaddBizId) _extra.bizId=_qaddBizId;
   const _newTx=addTransaction({date, type:_qaddType, category:cat, amount:amt, description:note,
-                accountId:_qaddAccId||defaultAccountId(),
+                accountId:_qaddAccId||defaultAccountId(), ..._extra,
                 ...( _qaddType===TX.SAVING && _qaddGoalId ? {goalId:_qaddGoalId} : {} )});
   if(_newTx && _newTx.error){ toast(_newTx.error,'error'); return; }
   if(_qaddType==='Charity') data.charities.push({id:uid(),txId:_newTx.id,type:cat,amount:amt,date,note});
@@ -7692,6 +7726,36 @@ function renderQaddGoalChips(){
     + active.map(g=>`<button class="acc-chip${g.id===_qaddGoalId?' active':''}" onclick="pickQaddGoal('${escJs(g.id)}')"><span>${g.icon||'🎯'}</span>${esc(g.name)}</button>`).join('');
 }
 function pickQaddGoal(id){ _qaddGoalId=id||null; renderQaddGoalChips(); }
+
+// ── مصدر الدخل / مصروف العيادة في شاشة الإضافة ──
+let _qaddSrcId=null, _qaddBizId=null;
+function renderQaddSrc(){
+  const sf=document.getElementById('qaddSrcField'), bf=document.getElementById('qaddBizField');
+  if(!sf || !bf) return;
+  if(_qaddType===TX.INCOME){
+    sf.style.display='block';
+    document.getElementById('qaddSrcRow').innerHTML=Object.entries(SRC_GROUPS).map(([g,gi])=>{
+      const list=SRC.active().filter(x=>x.group===g); if(!list.length) return '';
+      return list.map(x=>`<button class="acc-chip${x.id===_qaddSrcId?' active':''}" onclick="pickQaddSrc('${escJs(x.id)}')"><span>${x.icon||gi.icon}</span>${esc(x.name)}</button>`).join('');
+    }).join('');
+    const src=SRC.byId(_qaddSrcId);
+    document.getElementById('qaddCasesWrap').style.display = src && src.cases ? 'block' : 'none';
+  } else sf.style.display='none';
+  const clinics=SRC.clinics();
+  if(_qaddType===TX.EXPENSE && clinics.length){
+    bf.style.display='block';
+    document.getElementById('qaddBizRow').innerHTML=`<button class="acc-chip${!_qaddBizId?' active':''}" onclick="pickQaddBiz('')"><span>👤</span>شخصي</button>`+
+      clinics.map(c=>`<button class="acc-chip${c.id===_qaddBizId?' active':''}" onclick="pickQaddBiz('${escJs(c.id)}')"><span>🩺</span>${esc(c.name)}</button>`).join('');
+  } else bf.style.display='none';
+}
+function pickQaddSrc(id){
+  _qaddSrcId = _qaddSrcId===id ? null : id;
+  const src=SRC.byId(_qaddSrcId);
+  if(src) document.getElementById('qaddCat').value=src.name;
+  renderQaddSrc();
+  if(src && src.cases) setTimeout(()=>document.getElementById('qaddCases')?.focus(), 50);
+}
+function pickQaddBiz(id){ _qaddBizId=id||null; renderQaddSrc(); }
 
 
 // ══════════════════════════════════════════════════════════
@@ -10253,10 +10317,14 @@ function aiExec(name, a){
         const cat=String(a.category||'').trim().slice(0,40) || 'غير مصنّف';
         const desc=String(a.description||'').trim().slice(0,120);
         // النموذج أعاد نفس الطلب في نفس الرسالة ⇒ لا نسجّله مرتين
-        const key=[type,amt,cat,date,desc,accId].join('|');
+        const key=[type,amt,cat,date,desc,accId,a.source||'',a.cases||'',a.clinic||''].join('|');
         if(_ai.turnKeys && _ai.turnKeys.has(key))
           return { ok:true, duplicate:true, id:_ai.turnKeys.get(key), note:'نفس الحركة اتسجّلت بالفعل في هذه الرسالة ولم تُكرَّر. لو المستخدم يقصد حركتين متطابقتين اسأله.' };
-        const rec=addTransaction({ type, amount:amt, category:cat, date, description:desc, accountId:accId, tags:['ai'] });
+        const _src = type===TX.INCOME ? (SRC.match(a.source||'') || SRC.match(cat) || SRC.match(desc)) : null;
+        const _cases = _src && _src.cases && Number(a.cases)>0 && Number(a.cases)<1000 ? Math.round(Number(a.cases)) : undefined;
+        const _biz = type===TX.EXPENSE && a.clinic ? (SRC.clinics().find(c=>c.name===String(a.clinic).trim()) || SRC.clinics().find(c=>SRC.match(a.clinic)===c)) : null;
+        const rec=addTransaction({ type, amount:amt, category:_src ? _src.name : cat, date, description:desc, accountId:accId, tags:['ai'],
+                                   ...(_src?{sourceId:_src.id}:{}), ...(_cases?{cases:_cases}:{}), ...(_biz?{bizId:_biz.id}:{}) });
         if(!rec || rec.error) return { ok:false, error:(rec&&rec.error)||'تعذّر الحفظ' };
         let ok=_lastSaveOk;
         if(ok && type===TX.CHARITY){ data.charities.push({id:uid(),txId:rec.id,type:cat,amount:amt,date,note:desc}); ok=save(); }
@@ -10307,7 +10375,8 @@ function aiExec(name, a){
           debts:{ i_owe:d.totalIOwe, owed_to_me:d.totalOwedToMe, overdue_count:d.overdueCount, monthly_installments:d.monthlyLoad },
           goals: Q.goalsOverview().rows.slice(0,5).map(g=>({ name:g.name, target:g.target, saved:g.saved, pct:g.pct })),
           upcoming_30_days: Upcoming.items(30).slice(0,8).map(i=>({ title:i.title, amount:i.amount, date:i.date, overdue:i.overdue })),
-          wealth_plan: PE.forAI()
+          wealth_plan: PE.forAI(),
+          income_sources: SRC.forAI()
         };
       }
       case 'set_budget': {
@@ -10368,8 +10437,11 @@ function aiTools(S){
         category:S.string({ description:'فئة قصيرة بالعربي مثل: بنزين، طعام ومشروبات، راتب' }),
         date:S.string({ description:'YYYY-MM-DD، افتراضياً اليوم' }),
         description:S.string({ description:'ملاحظة قصيرة' }),
-        account:S.string({ description:'اسم الحساب إن ذكره المستخدم' })
-      }, optionalProperties:['date','description','account'] }) },
+        account:S.string({ description:'اسم الحساب إن ذكره المستخدم' }),
+        source:S.string({ description:'للدخل: مصدره من income_sources (مثلاً "عمليات المياه البيضاء" أو "عيادة الرحمانية")' }),
+        cases:S.integer({ description:'للعمليات/الحقن/الليزر: عدد الحالات إن ذكره المستخدم' }),
+        clinic:S.string({ description:'للمصروف: اسم العيادة لو المصروف على العيادة مش شخصي' })
+      }, optionalProperties:['date','description','account','source','cases','clinic'] }) },
     { name:'find_transactions',
       description:'ابحث في حركات المستخدم (بالفئة أو الوصف أو الشهر أو النوع) وأعد القائمة والإجمالي.',
       parameters:S.object({ properties:{
@@ -10403,6 +10475,7 @@ function aiSystem(){
 - استخدم فئة من الموجودة لو مناسبة: ${cats.join('، ')||'لا توجد'}.
 - الحسابات: ${activeAccounts().map(a=>a.name).join('، ')}.
 - لو الأداة رجّعت ميزانية قربت أو اتجاوزت، نبّه المستخدم في نفس الرد.
+- مصادر الدخل: عند تسجيل دخل حدّد source من income_sources، وللعمليات/الحقن/الليزر مرّر cases لو المستخدم ذكر عدد الحالات. مصروف العيادة (إيجار عيادة، طاقم، مستلزمات) مرّر clinic. لو مش واضح الدخل من أنهي مصدر أو المصروف شخصي ولا للعيادة، اسأل.
 - الزكاة: لو اتسألت عنها خد الأرقام من wealth_plan.zakat بالظبط، ووضّح إنها تقريبية، وما تفتيش في المسائل الخلافية — وجّه لجهة إفتاء موثوقة.
 - شاشة "ثروتي" فيها صافي الثروة وتوزيعها و"دستور مالي" (صندوق طوارئ، نسبة ادخار، توزيع شهادات/ذهب/أسهم وصناديق) وخطوات تالية محسوبة. لو اتسألت عن الثروة أو الخطة أو تدّخر/توزّع إزاي، خد الأرقام من wealth_plan في get_overview بالظبط، واشرح الخطوات اللي فيها بلغة بسيطة. ما ترشّحش أسهم أو صناديق أو بنوك بعينها، وما تخترعش عوائد. لو مفيش خطة، قوله يعملها من تحليل ← ثروتي. القرار دايماً للمستخدم.
 - شاشة "المستشار" في التطبيق بتحسب درجة صحة مالية من 6 محاور. لو اتسألت عنها أو عن محور منها، خد الأرقام من health في get_overview بالظبط، واشرح ليه المحور واخد الدرجة دي، والمحور غير المقيس ناقصه إيه عشان يتقاس، واقترح خطوات عملية بأرقام من بياناته.
@@ -10835,7 +10908,7 @@ const PE = {
   savingsRateActual(){
     const months=Q.lastMonths(4, cur_month()).slice(1);
     let inc=0, sav=0, n=0;
-    for(const m of months){ const t=Q.monthTotals(m); if(t.inc>0){ inc+=t.inc; sav+=t.sav; n++; } }
+    for(const m of months){ const t=SRC.personal(m); if(t.inc>0){ inc+=t.inc; sav+=t.sav; n++; } }
     return n ? { rate:sav/inc, avgIncome:inc/n, months:n } : { rate:null, avgIncome:null, months:0 };
   },
   /**
@@ -10908,6 +10981,11 @@ const PE = {
            `معدل ادخاري ${Math.round(sr.rate*100)}% وعايز أوصل ${p.savingsRatePct}%. أوفّر منين؟`);
     } else if(sr.rate==null) step(1,'سجّل دخلك وادخارك كام شهر عشان أقيس معدل ادخارك الفعلي.', null);
 
+    // دخل متغيّر: مصاريف فوق الدخل المضمون
+    const gi=SRC.guaranteed();
+    if(gi.ready && avgExp && avgExp>gi.min)
+      step(2, `متوسط مصاريفك الشخصية ${fmt(avgExp)} أعلى من دخلك المضمون ${fmt(gi.min)} — في الشهور الضعيفة هتسحب من الطوارئ. حاول تنزّل الثابت منها لتحت ${fmt(gi.min)}.`,
+           `مصاريفي ${fmt(Math.round(avgExp))} ودخلي المضمون ${fmt(Math.round(gi.min))}. أنزّل إيه من المصاريف الثابتة؟`);
     // سيولة زيادة فوق الطوارئ ⇒ توزيع يسدّ العجز عن النِّسب المستهدفة
     const minExcess = Math.max(avgExp ? 0.5*avgExp : 0, 0.05*longTotal, 1000);
     if(out.emergency && out.emergency.done && excess>=minExcess){
@@ -10954,6 +11032,165 @@ const PE = {
 };
 
 // ══════════════════════════════════════════════════════════
+// مصادر الدخل والعيادات (SRC)
+// ──────────────────────────────────────────────────────────
+// • كل دخل يُربط بمصدر (sourceId) — رواتب/عيادات/عمليات وإجراءات، وللعمليات عدد حالات.
+// • مصاريف العيادة تُعلَّم bizId فتُحسب على العيادة لا على مصاريفك الشخصية.
+//   "الشخصي" = الإجمالي − مصاريف العيادات، ويُستخدم في الطوارئ ومعدل الادخار والخطة.
+// • "دخلك المضمون" = أقل دخل شخصي شهري في آخر 6 شهور مكتملة (3 على الأقل).
+// ══════════════════════════════════════════════════════════
+const SRC_GROUPS = Object.freeze({
+  salary   :{ label:'رواتب',            icon:'🏥' },
+  clinic   :{ label:'عيادات',           icon:'🩺' },
+  procedure:{ label:'عمليات وإجراءات', icon:'👁️' },
+  other    :{ label:'أخرى',             icon:'💵' }
+});
+const DEFAULT_INCOME_SOURCES = Object.freeze([
+  { id:'sal_dmn',   name:'مركز دمنهور للعيون',     group:'salary',    kw:'مركز دمنهور' },
+  { id:'sal_safwa', name:'مركز الصفوة كفر الدوار', group:'salary',    kw:'الصفو[ةه]|كفر الدوار' },
+  { id:'sal_hosp',  name:'مستشفى العيون',          group:'salary',    kw:'مستشف[ىي]' },
+  { id:'cl_rah',    name:'عيادة الرحمانية',        group:'clinic',    kw:'الرحماني[ةه]' },
+  { id:'cl_dmn',    name:'عيادة دمنهور',           group:'clinic',    kw:'عياد[ةه] دمنهور' },
+  { id:'op_cat',    name:'عمليات المياه البيضاء',  group:'procedure', kw:'مي[اي][هة] بيضاء|المياه البيضاء|كتاركت|cataract|فاكو', cases:true, icon:'👁️' },
+  { id:'op_lasik',  name:'عمليات الليزك',          group:'procedure', kw:'ليزك|lasik', cases:true, icon:'🔆' },
+  { id:'op_inj',    name:'الحقن',                  group:'procedure', kw:'حقن|حقنة|انترافيتريال|اڤاستين|افاستين', cases:true, icon:'💉' },
+  { id:'op_laser',  name:'الليزر',                 group:'procedure', kw:'(^|[^ي])ليزر', cases:true, icon:'✨' }
+]);
+const SRC = {
+  list(){ return Array.isArray(data.incomeSources) && data.incomeSources.length ? data.incomeSources : DEFAULT_INCOME_SOURCES; },
+  active(){ return this.list().filter(x=>x && !x.archived); },
+  byId(id){ return id ? this.list().find(x=>x.id===id) || null : null; },
+  byName(n){ const q=String(n||'').trim(); return q ? this.active().find(x=>x.name===q) || null : null; },
+  clinics(){ return this.active().filter(x=>x.group==='clinic'); },
+  /** نص حرّ (من المساعد) ⇒ مصدر — الأدق أولاً (عيادة دمنهور قبل مركز دمنهور، الليزك قبل الليزر) */
+  match(text){
+    const t=String(text||'');
+    const exact=this.byName(t); if(exact) return exact;
+    for(const x of this.active()){ if(x.kw){ try{ if(new RegExp(x.kw,'i').test(t)) return x; }catch(e){} } }
+    return null;
+  },
+  of(tx){ if(!tx || tx.type!==TX.INCOME) return null; return this.byId(tx.sourceId) || this.byName(tx.category); },
+  bizExpense(m, clinicId){
+    let s=0;
+    for(const t of Q.month(m)) if(t.type===TX.EXPENSE && t.bizId && (!clinicId || t.bizId===clinicId)) s+=FE.amountOf(t);
+    return s;
+  },
+  /** أرقام شخصية لشهر: بعد استبعاد مصاريف العيادات */
+  personal(m){
+    const t=Q.monthTotals(m), biz=this.bizExpense(m);
+    return { inc:Math.max(0,t.inc-biz), exp:Math.max(0,t.exp-biz), sav:t.sav, chr:t.chr, grossInc:t.inc, biz };
+  },
+  /** دخل كل مصدر في شهر */
+  month(m){
+    const by={};
+    for(const t of Q.month(m)){
+      if(t.type!==TX.INCOME) continue;
+      const src=this.of(t), k=src ? src.id : '_other';
+      const r=by[k]||(by[k]={ amount:0, cases:0, count:0 });
+      r.amount+=FE.amountOf(t); r.count++; r.cases+=Number(t.cases)||0;
+    }
+    return by;
+  },
+  completeMonths(n){ return Q.lastMonths(n+1).slice(1); },
+  stats(id){
+    const ms=this.completeMonths(6);
+    const vals=ms.map(m=>(this.month(m)[id]||{}).amount||0);
+    const has=vals.filter(v=>v>0).length;
+    const avg=vals.reduce((a,b)=>a+b,0)/vals.length;          // متوسط شهري على 6 شهور (الشهر الفاضي = صفر)
+    const recent=(vals[0]+vals[1]+vals[2])/3, older=(vals[3]+vals[4]+vals[5])/3;
+    const trend = has>=4 && older>0 ? (recent-older)/older : null;
+    return { avg6:avg, last:vals[0], trend, monthsWithIncome:has };
+  },
+  /** دخلك المضمون: أقل دخل شخصي شهري في آخر 6 شهور مكتملة فيها دخل (3 على الأقل) */
+  guaranteed(){
+    const vals=this.completeMonths(6).map(m=>this.personal(m).inc).filter(v=>v>0);
+    if(vals.length<3) return { ready:false, months:vals.length };
+    const min=Math.min(...vals), avg=vals.reduce((a,b)=>a+b,0)/vals.length;
+    return { ready:true, min, avg, max:Math.max(...vals), months:vals.length, swing: avg>0 ? (avg-min)/avg : 0 };
+  },
+  clinicNet(m, id){ const inc=(this.month(m)[id]||{}).amount||0, exp=this.bizExpense(m, id); return { inc, exp, net:inc-exp }; },
+  /** متوسط مصاريف عيادة شهرياً (آخر 3 شهور مكتملة) */
+  clinicAvgExpense(id){ const ms=this.completeMonths(3); return ms.reduce((t,m)=>t+this.bizExpense(m,id),0)/ms.length; },
+  forAI(){
+    const m=cur_month(), pm=MR.prevMonth(), cur=this.month(m), prev=this.month(pm), g=this.guaranteed();
+    return {
+      sources:this.active().map(x=>{ const st=this.stats(x.id), c=cur[x.id]||{}, p=prev[x.id]||{};
+        return { name:x.name, group:SRC_GROUPS[x.group]?.label||x.group, this_month:Math.round(c.amount||0), last_month:Math.round(p.amount||0),
+                 cases_this_month:x.cases?(c.cases||0):undefined, cases_last_month:x.cases?(p.cases||0):undefined,
+                 avg_6m:Math.round(st.avg6), trend_pct: st.trend==null?null:Math.round(st.trend*100) }; }),
+      clinics:this.clinics().map(c=>{ const n=this.clinicNet(m,c.id), q=this.clinicNet(pm,c.id); return { name:c.name, this_month:{ income:Math.round(n.inc), expenses:Math.round(n.exp), net:Math.round(n.net) }, last_month:{ income:Math.round(q.inc), expenses:Math.round(q.exp), net:Math.round(q.net) } }; }),
+      guaranteed_income: g.ready ? { min:Math.round(g.min), avg:Math.round(g.avg), max:Math.round(g.max), months:g.months } : { ready:false, months_with_income:g.months, need:3 },
+      note:'الأرقام الشخصية (الطوارئ ومعدل الادخار) بعد استبعاد مصاريف العيادات.'
+    };
+  }
+};
+
+let _incMonth=null, _srcEdit=false;
+function renderIncomeCard(){
+  const el=document.getElementById('incomeCard'); if(!el) return;
+  if(_srcEdit){ el.innerHTML=srcEditorHtml(); return; }
+  const m=_incMonth||cur_month(), by=SRC.month(m);
+  const total=Object.values(by).reduce((t,r)=>t+r.amount,0);
+  const chip=(mm,l)=>`<button class="acc-chip${mm===m?' active':''}" onclick="_incMonth='${mm}';renderIncomeCard()">${l}</button>`;
+  let rows='';
+  for(const [g,gi] of Object.entries(SRC_GROUPS)){
+    const list=SRC.active().filter(x=>x.group===g); if(!list.length) continue;
+    rows+=`<div class="wl-tgt" style="margin-top:10px;font-weight:800">${gi.icon} ${gi.label}</div>`;
+    for(const x of list){
+      const r=by[x.id]||{amount:0,cases:0}, st=SRC.stats(x.id);
+      const tr = st.trend==null ? '' : st.trend>0.1 ? ' <span style="color:var(--mint)">↗</span>' : st.trend<-0.1 ? ' <span style="color:var(--coral)">↘</span>' : ' →';
+      const cases = x.cases && r.cases ? ` · ${r.cases} حالة (${fmt(r.amount/r.cases)}/حالة)` : '';
+      rows+=`<div class="wl-row"><span>${x.icon||gi.icon}</span><div class="wl-l">${esc(x.name)}${tr}<div class="wl-tgt">${st.avg6?'متوسط 6 شهور '+fmt(st.avg6):'—'}${cases}</div></div><span class="wl-v">${r.amount?fmt(r.amount):'—'}</span></div>`;
+    }
+  }
+  if(by._other) rows+=`<div class="wl-row"><span>💵</span><div class="wl-l">دخل بدون مصدر</div><span class="wl-v">${fmt(by._other.amount)}</span></div>`;
+  const clinics=SRC.clinics().map(c=>{ const n=SRC.clinicNet(m,c.id);
+    return `<div class="wl-row"><span>🩺</span><div class="wl-l">${esc(c.name)}<div class="wl-tgt">دخل ${fmt(n.inc)} − مصاريف ${fmt(n.exp)}</div></div><span class="wl-v" style="color:${n.net>=0?'var(--mint)':'var(--coral)'}">${n.net<0?'−':''}${fmt(Math.abs(n.net))}</span></div>`; }).join('');
+  const g=SRC.guaranteed();
+  const gHtml = g.ready
+    ? `<div class="wl-row"><span>🛡️</span><div class="wl-l">دخلك المضمون<div class="wl-tgt">أقل شهر في آخر ${g.months} شهور · المتوسط ${fmt(g.avg)}</div></div><span class="wl-v">${fmt(g.min)}</span></div>
+       <div class="wl-why">خطّط مصاريفك الثابتة على ${fmt(g.min)}، وأي دخل فوقه يروح نسبة أكبر منه للادخار والاستثمار.</div>`
+    : `<div class="wl-why">"دخلك المضمون" بيتحسب بعد 3 شهور كاملة فيها دخل (عندك ${g.months}).</div>`;
+  el.innerHTML=`<div class="card-title"><div class="card-title-icon">💵</div>مصادر دخلك</div>
+    <div style="display:flex;gap:7px;margin-bottom:4px">${chip(cur_month(),'الشهر ده')}${chip(MR.prevMonth(),'الشهر اللي فات')}</div>
+    <div class="wl-sub">إجمالي ${monthLabelOf(m)}: <b>${fmt(total)}</b></div>
+    ${rows}
+    ${clinics?`<div class="card-title" style="margin-top:14px"><div class="card-title-icon">🩺</div>صافي العيادات</div>${clinics}`:''}
+    <div class="card-title" style="margin-top:14px"><div class="card-title-icon">🛡️</div>الدخل المتغيّر</div>
+    ${gHtml}
+    <button class="btn btn-ghost btn-sm" style="width:100%;justify-content:center;margin-top:10px" onclick="_srcEdit=true;renderIncomeCard()">⚙️ تعديل المصادر</button>`;
+}
+function srcEditorHtml(){
+  const L=SRC.list();
+  const gsel=(i,g)=>`<select id="seG${i}" class="qadd-input" style="padding:8px;flex:1;min-width:0">${Object.entries(SRC_GROUPS).map(([k,v])=>`<option value="${k}"${k===g?' selected':''}>${v.label}</option>`).join('')}</select>`;
+  return `<div class="card-title"><div class="card-title-icon">⚙️</div>تعديل مصادر الدخل</div>
+    ${L.map((x,i)=>`<div style="border-bottom:1px solid var(--border);padding:9px 0">
+      <input id="seN${i}" class="qadd-input" value="${esc(x.name)}" style="margin-bottom:6px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">${gsel(i,x.group)}
+        <label style="font-size:12px;display:flex;gap:5px;align-items:center;white-space:nowrap"><input type="checkbox" style="width:18px;height:18px;min-width:18px;flex-shrink:0;accent-color:var(--mint)" id="seC${i}" ${x.cases?'checked':''}> عدد حالات</label>
+        <label style="font-size:12px;display:flex;gap:5px;align-items:center;white-space:nowrap"><input type="checkbox" style="width:18px;height:18px;min-width:18px;flex-shrink:0;accent-color:var(--mint)" id="seA${i}" ${x.archived?'':'checked'}> مفعّل</label></div></div>`).join('')}
+    <div style="padding:9px 0"><input id="seNew" class="qadd-input" placeholder="+ مصدر جديد (اختياري)"></div>
+    <div style="display:flex;gap:8px"><button class="btn btn-primary" style="flex:2" onclick="saveSources()">💾 حفظ</button>
+      <button class="btn btn-ghost" style="flex:1" onclick="_srcEdit=false;renderIncomeCard()">إلغاء</button></div>
+    <div class="wl-why">تغيير الاسم ما بيأثرش على الحركات القديمة — مربوطة بالمصدر نفسه. المصدر الموقوف بيختفي من شاشة الإضافة بس.</div>`;
+}
+function saveSources(){
+  const L=SRC.list().map((x,i)=>{
+    const name=(document.getElementById('seN'+i)?.value||'').trim().slice(0,40) || x.name;
+    return { ...x, name, group:document.getElementById('seG'+i)?.value||x.group,
+             cases:!!document.getElementById('seC'+i)?.checked, archived:!document.getElementById('seA'+i)?.checked };
+  });
+  const nn=(document.getElementById('seNew')?.value||'').trim().slice(0,40);
+  if(nn) L.push({ id:'src_'+uid(), name:nn, group:'other' });
+  const names=L.filter(x=>!x.archived).map(x=>x.name);
+  if(new Set(names).size!==names.length){ toast('في اسمين متكررين','error'); return false; }
+  const prev=data.incomeSources;
+  data.incomeSources=L.map(x=>({ id:x.id, name:x.name, group:SRC_GROUPS[x.group]?x.group:'other', cases:!!x.cases, archived:!!x.archived, ...(x.kw?{kw:x.kw}:{}), ...(x.icon?{icon:x.icon}:{}) }));
+  if(!save()){ data.incomeSources=prev; toast('لم يُحفظ — تعذّر الحفظ على الجهاز','error'); return false; }
+  _srcEdit=false; renderIncomeCard(); toast('اتحفظت المصادر ✅'); return true;
+}
+
+// ══════════════════════════════════════════════════════════
 // المرحلة 3 — تقسيم الدخل (IE)
 // ──────────────────────────────────────────────────────────
 // عند دخول دخل: التزامات باقي الشهر (للعلم، تبقى في الحساب) ← ادخار
@@ -10987,11 +11224,28 @@ const IE = {
     const p=PE.get(); if(!p || !tx) return null;
     const amount=FE.amountOf(tx), st=PE.status(), why=[];
     const oblItems=this.obligations();
+    // دخل عيادة ⇒ نحجز متوسط مصاريفها الشهرية الباقي (إيجار/طاقم/مستلزمات)
+    const src=SRC.of(tx);
+    if(src && src.group==='clinic'){
+      const left=Math.max(0, Math.round(SRC.clinicAvgExpense(src.id) - SRC.bizExpense(cur_month(), src.id)));
+      if(left>0){ oblItems.push({ title:'مصاريف '+src.name+' المتوقعة', amount:Math.min(left, amount) }); why.push(`حجزت متوسط مصاريف ${src.name} الباقية للشهر`); }
+    }
     const obl=oblItems.reduce((t,i)=>t+i.amount,0);
-    const saveTarget=Math.round(amount*p.savingsRatePct/100);
+    // الدخل فوق "المضمون" ⇒ نسبة ادخار أعلى (50% على الأقل)
+    const g=SRC.guaranteed();
+    let saveTarget=Math.round(amount*p.savingsRatePct/100);
+    if(g.ready){
+      const before=Math.max(0, SRC.personal((tx.date||cur_month()).slice(0,7)).inc - amount);
+      const extra=Math.max(0, Math.min(amount, before+amount-Math.max(g.min, before)));
+      if(extra>0){
+        const hi=Math.max(p.savingsRatePct, 50);
+        saveTarget=Math.round((amount-extra)*p.savingsRatePct/100 + extra*hi/100);
+        why.push(`${fmt(extra)} من الدخل ده فوق دخلك المضمون (${fmt(g.min)}) ⇒ ادخار ${hi}% منه`);
+      }
+    }
     const room=Math.max(0, amount-obl);
     let left=Math.min(saveTarget, room);
-    why.push(`الادخار ${p.savingsRatePct}% من الدخل = ${fmt(saveTarget)}`);
+    why.unshift(`الادخار المقترح من الدخل ده = ${fmt(saveTarget)} (أساس ${p.savingsRatePct}%)`);
     if(left<saveTarget) why.push(`التزامات باقي الشهر ${fmt(obl)} ⇒ المتاح للادخار ${fmt(left)} بس`);
     const lines=[];
     const add=(l)=>{ if(l.amount>0){ lines.push(l); left-=l.amount; } };
@@ -11152,7 +11406,7 @@ const MR = {
     const entry = m===cur ? { net:Math.round(WE.snapshot().net) } : hist.find(h=>h.month===m) || null;
     const prevM = Q.lastMonths(2, m)[1];
     const prev  = hist.find(h=>h.month===prevM) || null;
-    const t=Q.monthTotals(m);
+    const t=SRC.personal(m);
     const incomes=Repo.tx().filter(x=>x.type===TX.INCOME && (x.date||'').startsWith(m));
     const log=IE.log();
     const done=incomes.filter(x=>log.some(l=>l.txId===x.id && !l.skipped)).length;
@@ -11347,7 +11601,7 @@ let _planDraft=null;     // مقابلة الخطة الجارية (في الذ�
 function renderWealth(){
   try{ WE.recordSnapshot(); }catch(e){}
   renderWealthCard(); renderPlanCard();
-  try{ renderReviewCard(); renderZakatCard(); renderDecisionCard(); }catch(e){ console.warn(e); }
+  try{ renderIncomeCard(); renderReviewCard(); renderZakatCard(); renderDecisionCard(); }catch(e){ console.warn(e); }
 }
 function renderWealthCard(){
   const el=document.getElementById('wealthCard'); if(!el) return;
@@ -11511,6 +11765,12 @@ function smartAlerts(){
     }
     for(const x of WE.stalePrices().slice(0,1))
       add(`stale:${x.a.id}:${mo}`, 1, '🏷️', `حدّث سعر "${x.a.name}" عشان ثروتك تتحسب صح`, null);
+    // مصدر دخل وقع الشهر اللي فات لأقل من نص متوسطه
+    for(const x of SRC.active()){
+      const st=SRC.stats(x.id);
+      if(st.monthsWithIncome>=3 && st.avg6>0 && st.last < 0.5*st.avg6)
+        { add(`srcdrop:${x.id}:${mo}`, 1, '📉', `${x.name} الشهر اللي فات ${fmt(st.last)} — أقل من نص متوسطه (${fmt(st.avg6)})`, `دخل ${x.name} نزل الشهر اللي فات. أعمل إيه عشان ما يأثرش على خطتي؟`); break; }
+    }
     // مراجعة الشهر اللي فات — أول 10 أيام من الشهر
     if(PE.get() && Number(today.slice(8,10))<=10){
       const pm=MR.prevMonth();
