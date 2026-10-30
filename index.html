@@ -1644,6 +1644,9 @@ body.ai-open .toast{bottom:150px}
     <div id="aview-wealth" style="display:none">
       <div class="card" id="wealthCard"></div>
       <div class="card" id="planCard"></div>
+      <div class="card" id="reviewCard"></div>
+      <div class="card" id="zakatCard"></div>
+      <div class="card" id="decisionCard"></div>
     </div>
 
     <!-- ── VIEW: AI ADVISOR ── -->
@@ -10400,6 +10403,7 @@ function aiSystem(){
 - استخدم فئة من الموجودة لو مناسبة: ${cats.join('، ')||'لا توجد'}.
 - الحسابات: ${activeAccounts().map(a=>a.name).join('، ')}.
 - لو الأداة رجّعت ميزانية قربت أو اتجاوزت، نبّه المستخدم في نفس الرد.
+- الزكاة: لو اتسألت عنها خد الأرقام من wealth_plan.zakat بالظبط، ووضّح إنها تقريبية، وما تفتيش في المسائل الخلافية — وجّه لجهة إفتاء موثوقة.
 - شاشة "ثروتي" فيها صافي الثروة وتوزيعها و"دستور مالي" (صندوق طوارئ، نسبة ادخار، توزيع شهادات/ذهب/أسهم وصناديق) وخطوات تالية محسوبة. لو اتسألت عن الثروة أو الخطة أو تدّخر/توزّع إزاي، خد الأرقام من wealth_plan في get_overview بالظبط، واشرح الخطوات اللي فيها بلغة بسيطة. ما ترشّحش أسهم أو صناديق أو بنوك بعينها، وما تخترعش عوائد. لو مفيش خطة، قوله يعملها من تحليل ← ثروتي. القرار دايماً للمستخدم.
 - شاشة "المستشار" في التطبيق بتحسب درجة صحة مالية من 6 محاور. لو اتسألت عنها أو عن محور منها، خد الأرقام من health في get_overview بالظبط، واشرح ليه المحور واخد الدرجة دي، والمحور غير المقيس ناقصه إيه عشان يتقاس، واقترح خطوات عملية بأرقام من بياناته.
 - ما تحذفش غير بطلب صريح وبعد ما تلاقي الحركة. التطبيق هيطلب موافقة المستخدم بنفسه؛ لو رجع إن المستخدم رفض، ما تحاولش تاني.
@@ -10937,6 +10941,12 @@ const PE = {
       excess_liquid: Math.round(st.excessLiquid||0),
       next_steps: st.steps.map(x=>x.text),
       income_waiting_split: IE.pending().slice(0,5).map(t=>({ id:t.id, amount:t.amount, category:t.category, date:t.date })),
+      monthly_review: p ? (()=>{ const r=MR.review(MR.prevMonth()); return { month:r.month, net_change:r.netChange, savings_rate_pct: r.rate!=null?Math.round(r.rate*100):null,
+                        target_pct:r.target, incomes:r.incomes, split_done:r.splitDone, split_skipped:r.splitSkipped }; })() : null,
+      decisions_since_plan: (()=>{ const t=DL.totals(); return { to_emergency:Math.round(t.emergency), to_goals:Math.round(t.goals), to_invest:Math.round(t.invest), splits:t.splits, skipped:t.skipped }; })(),
+      zakat: (()=>{ const z=ZE.status(); return z.configured ? { zakatable:Math.round(z.total), nisab:Math.round(z.nisab), above_nisab:z.above, amount:z.amount,
+                        next_hawl:z.next, due_now:z.dueNow, remaining:z.remaining, options:{ include_gold:z.cfg.includeGold, include_receivables:z.cfg.includeReceivables, deduct_debts:z.cfg.deductDebts },
+                        note:'حساب تقريبي على رأي شائع؛ المسائل الخلافية يُرجع فيها لجهة إفتاء.' } : { configured:false, how:'من شاشة ثروتي ← زكاة المال' }; })(),
       split_how:'التقسيم يتنفّذ من المستخدم بنفسه: شاشة ثروتي ← "قسّمه"، أو تنبيه ➗ في الرئيسية. المساعد لا ينفّذه.',
       rules:'قواعد عامة معلنة في التطبيق، ليست نصيحة استثمار مرخّصة. لا ترشيح لأسهم أو صناديق بعينها. القرار للمستخدم.'
     };
@@ -11130,11 +11140,214 @@ function skipSplit(){
   return true;
 }
 
+// ══════════════════════════════════════════════════════════
+// المرحلة 4 — المتابعة: مراجعة شهرية · الزكاة · سجل القرارات
+// ══════════════════════════════════════════════════════════
+const PLAN_LOG_MAX = 100;
+const MR = {
+  prevMonth(){ return Q.lastMonths(2)[1]; },
+  /** مراجعة شهر: من لقطات الثروة + حركات الشهر + سجل التقسيم */
+  review(m){
+    const p=PE.get(), cur=cur_month(), hist=WE.history();
+    const entry = m===cur ? { net:Math.round(WE.snapshot().net) } : hist.find(h=>h.month===m) || null;
+    const prevM = Q.lastMonths(2, m)[1];
+    const prev  = hist.find(h=>h.month===prevM) || null;
+    const t=Q.monthTotals(m);
+    const incomes=Repo.tx().filter(x=>x.type===TX.INCOME && (x.date||'').startsWith(m));
+    const log=IE.log();
+    const done=incomes.filter(x=>log.some(l=>l.txId===x.id && !l.skipped)).length;
+    const skipped=incomes.filter(x=>log.some(l=>l.txId===x.id && l.skipped)).length;
+    const st=PE.status();
+    return { month:m, isCurrent:m===cur,
+      netEnd: entry ? entry.net : null, netStart: prev ? prev.net : null,
+      netChange: entry && prev ? entry.net - prev.net : null,
+      inc:t.inc, exp:t.exp, sav:t.sav, chr:t.chr,
+      rate: t.inc>0 ? t.sav/t.inc : null, target: p ? p.savingsRatePct : null,
+      incomes:incomes.length, splitDone:done, splitSkipped:skipped, splitNone:incomes.length-done-skipped,
+      emergencyMonths: st.emergency && st.emergency.months!=null ? st.emergency.months : null,
+      emergencyTarget: p ? p.emergencyMonths : null,
+      nextStep: st.steps[0] ? st.steps[0].text : null };
+  }
+};
+
+/**
+ * الزكاة — حساب تقريبي على رأي شائع: ربع العشر (2.5%) إذا بلغ المال الزكوي
+ * نصاب 85 جرام ذهب عيار 24 عند تمام الحول (سنة هجرية ≈ 354 يوماً).
+ * المسائل الخلافية (ذهب، ديون لك، خصم ديونك) خيارات يحدّدها المستخدم.
+ */
+const ZAKAT_RATE = 0.025, NISAB_GRAMS = 85, HAWL_DAYS = 354;
+const ZE = {
+  cfg(){ return Object.assign({ hawlDate:'', gold24:0, includeGold:true, includeReceivables:true, deductDebts:true }, data.zakat||{}); },
+  addDays(d, n){ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()+n); return x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0'); },
+  daysBetween(a, b){ return Math.round((new Date(b+'T00:00:00')-new Date(a+'T00:00:00'))/86400000); },
+  /** آخر موعد حول ≤ اليوم، والقادم */
+  dates(){
+    const c=this.cfg(), today=today_str();
+    if(!isISODate(c.hawlDate)) return { last:null, next:null };
+    let d=c.hawlDate;
+    if(d>today) return { last:null, next:d };
+    let guard=0;
+    while(this.addDays(d, HAWL_DAYS)<=today && guard++<200) d=this.addDays(d, HAWL_DAYS);
+    return { last:d, next:this.addDays(d, HAWL_DAYS) };
+  },
+  paidSince(date){
+    if(!date) return 0;
+    return Repo.tx().filter(t=>t.type===TX.CHARITY && /زكا[ةه]/.test(t.category||'') && !/فطر/.test(t.category||'') && (t.date||'')>=date)
+      .reduce((s,t)=>s+FE.amountOf(t),0);
+  },
+  status(){
+    const c=this.cfg(), sn=WE.snapshot(), nw=FE.netWorth();
+    const parts={ liquid:sn.buckets.liquid, cert:sn.buckets.cert, equity:sn.buckets.equity,
+                  gold: c.includeGold ? sn.buckets.gold : 0,
+                  receivables: c.includeReceivables ? (nw.debtDue||0) : 0,
+                  debts: c.deductDebts ? (nw.liabilities||0) : 0 };
+    const total=Math.max(0, parts.liquid+parts.cert+parts.equity+parts.gold+parts.receivables-parts.debts);
+    const gold24=Number(c.gold24)||0;
+    const nisab = gold24>0 ? NISAB_GRAMS*gold24 : null;
+    const above = nisab!=null && total>=nisab;
+    const amount = above ? Math.round(total*ZAKAT_RATE) : 0;
+    const d=this.dates(), today=today_str();
+    const paid=this.paidSince(d.last);
+    const dueNow = !!d.last && this.daysBetween(d.last, today)<=60 && above && paid<amount;
+    return { cfg:c, parts, total, nisab, above, amount, last:d.last, next:d.next,
+             daysToNext: d.next ? this.daysBetween(today, d.next) : null,
+             paidSinceLast:paid, remaining: dueNow ? Math.max(0, amount-paid) : 0, dueNow,
+             configured: isISODate(c.hawlDate) && gold24>0 };
+  }
+};
+
+const DL = {
+  /** سجل القرارات: التقسيمات + تعديلات الخطة، الأحدث أولاً */
+  entries(){
+    const out=[];
+    for(const l of IE.log()){
+      const t=Repo.tx().find(x=>x.id===l.txId);
+      out.push({ at:l.at, kind: l.skipped ? 'skip' : 'split', amount:l.amount!=null ? l.amount : (t ? t.amount : null),
+                 lines:l.lines||[], income: t ? (t.category||'دخل') : 'دخل' });
+    }
+    for(const p of (Array.isArray(data.planLog)?data.planLog:[])) out.push({ at:p.at, kind:'plan', plan:p });
+    return out.sort((a,b)=> (a.at||'')<(b.at||'') ? 1 : -1);
+  },
+  /** ما خرج من التقسيمات منذ بداية الخطة، مصنّفاً */
+  totals(){
+    const r={ emergency:0, goals:0, invest:0, splits:0, skipped:0 };
+    for(const l of IE.log()){
+      if(l.skipped){ r.skipped++; continue; }
+      r.splits++;
+      for(const x of (l.lines||[])){
+        const t=Repo.tx().find(y=>y.id===x.txId);          // الحركة ما زالت موجودة؟ (لو اتحذفت لا تُحسب)
+        if(!t) continue;
+        if(t.type===TX.TRANSFER) r.emergency+=FE.amountOf(t);
+        else if(t.goalId) r.goals+=FE.amountOf(t);
+        else r.invest+=FE.amountOf(t);
+      }
+    }
+    return r;
+  }
+};
+
+function renderReviewCard(){
+  const el=document.getElementById('reviewCard'); if(!el) return;
+  if(!PE.get()){ el.style.display='none'; return; }
+  el.style.display='';
+  const m = (typeof _reviewMonth==='string' && _reviewMonth) || MR.prevMonth();
+  const r=MR.review(m);
+  const chip=(mm,l)=>`<button class="acc-chip${mm===m?' active':''}" onclick="_reviewMonth='${mm}';renderReviewCard()">${l}</button>`;
+  const row=(ic,l,v,c)=>`<div class="wl-row"><span>${ic}</span><div class="wl-l">${l}</div><span class="wl-v"${c?` style="color:${c}"`:''}>${v}</span></div>`;
+  const rateTxt = r.rate==null ? '—' : Math.round(r.rate*100)+'%';
+  const rateOk = r.rate!=null && r.target!=null && r.rate*100 >= r.target-0.5;
+  el.innerHTML=`<div class="card-title"><div class="card-title-icon">📅</div>مراجعة ${monthLabelOf(m)}</div>
+    <div class="wl-opts" style="display:flex;gap:7px;margin-bottom:8px">${chip(MR.prevMonth(),'الشهر اللي فات')}${chip(cur_month(),'الشهر ده (لحد دلوقتي)')}</div>
+    ${row('💼','تغيّر صافي الثروة', r.netChange==null ? 'أول شهر متسجّل' : (r.netChange>=0?'+':'−')+fmt(Math.abs(r.netChange)), r.netChange==null?null:(r.netChange>=0?'var(--mint)':'var(--coral)'))}
+    ${row('💰','نسبة الادخار', rateTxt+(r.target!=null?` من ${r.target}%`:''), r.rate==null?null:(rateOk?'var(--mint)':'var(--amber)'))}
+    ${row('📥','الدخل / المصروف', `${fmt(r.inc)} / ${fmt(r.exp)}`)}
+    ${row('➗','الدخل المقسّم', r.incomes ? `${r.splitDone} من ${r.incomes}${r.splitSkipped?` · اتخطّى ${r.splitSkipped}`:''}` : 'مفيش دخل')}
+    ${row('🛟','صندوق الطوارئ الآن', r.emergencyMonths==null ? '—' : `${r.emergencyMonths.toFixed(1)} من ${r.emergencyTarget} شهور`)}
+    ${r.nextStep?`<div class="wl-why" style="font-size:12.5px">👣 الأهم دلوقتي: ${esc(r.nextStep)}</div>`:''}
+    <button class="btn btn-ghost btn-sm" style="margin-top:10px;width:100%;justify-content:center" onclick="askAssistant('راجع معايا ${escJs(monthLabelOf(m))}: الثروة والادخار والتزامي بخطتي، وقولي أهم حاجة أعملها الشهر الجاي')">🤖 راجعه مع المساعد</button>`;
+}
+let _reviewMonth=null;
+
+function renderZakatCard(){
+  const el=document.getElementById('zakatCard'); if(!el) return;
+  const z=ZE.status(), c=z.cfg;
+  const ck=(id,on,l)=>`<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;margin:6px 0"><input type="checkbox" id="${id}" ${on?'checked':''} style="width:18px;height:18px;accent-color:var(--mint)"> ${l}</label>`;
+  const form=`<div class="wl-inp" style="margin-top:8px">
+      <div class="form-row"><label>تاريخ حولك (أول مرة)</label><input type="date" id="zkHawl" value="${esc(c.hawlDate||'')}"></div>
+      <div class="form-row"><label>سعر جرام الذهب عيار 24</label><input type="number" id="zkGold" min="0" step="any" inputmode="decimal" value="${c.gold24||''}"></div>
+    </div>
+    ${ck('zkIncGold',c.includeGold,'أحسب الذهب اللي مسجّله كأصل')}
+    ${ck('zkIncRecv',c.includeReceivables,'أحسب الفلوس اللي ليّا عند الناس')}
+    ${ck('zkDedDebt',c.deductDebts,'أخصم ديوني والتزاماتي')}
+    <button class="btn btn-primary btn-sm" style="width:100%;justify-content:center;margin-top:6px" onclick="saveZakat()">💾 حفظ</button>`;
+  if(!z.configured){
+    el.innerHTML=`<div class="card-title"><div class="card-title-icon">🕌</div>زكاة المال</div>
+      <div class="wl-sub" style="font-size:12.5px">حدّد تاريخ حولك وسعر جرام الذهب عيار 24، والتطبيق يحسب النصاب والمبلغ وينبّهك قبل الموعد.</div>${form}`;
+    return;
+  }
+  const P=z.parts;
+  const line=(l,v,neg)=>v?`<div class="wl-row"><div class="wl-l">${l}</div><span class="wl-v"${neg?' style="color:var(--coral)"':''}>${neg?'−':''}${fmt(v)}</span></div>`:'';
+  const head = z.dueNow
+    ? `<div class="wl-net" style="color:var(--amber)">${fmt(z.remaining)} <span style="font-size:13px;color:var(--muted)">مستحقة الآن</span></div>`
+    : `<div class="wl-net">${fmt(z.amount)} <span style="font-size:13px;color:var(--muted)">${z.above?'لو حلّ الحول النهارده':'— تحت النصاب'}</span></div>`;
+  el.innerHTML=`<div class="card-title"><div class="card-title-icon">🕌</div>زكاة المال</div>
+    ${head}
+    <div class="wl-sub">الحول الجاي: ${z.next?esc(z.next)+` (بعد ${z.daysToNext} يوم)`:'—'} · النصاب ${fmt(z.nisab)} (${NISAB_GRAMS} جرام × ${fmt(c.gold24)})${z.last?` · مدفوع من آخر حول ${fmt(z.paidSinceLast)}`:''}</div>
+    <div style="margin-top:8px">
+      ${line('💵 سيولة',P.liquid)}${line('📜 شهادات وودائع',P.cert)}${line('📈 أسهم وصناديق',P.equity)}${line('🥇 ذهب',P.gold)}${line('🤝 فلوس ليك',P.receivables)}${line('📕 ديون عليك',P.debts,true)}
+      <div class="wl-row"><div class="wl-l"><b>المال الزكوي</b></div><span class="wl-v">${fmt(z.total)}</span></div>
+    </div>
+    ${z.dueNow?`<button class="btn btn-primary btn-sm" style="width:100%;justify-content:center;margin-top:10px" onclick="payZakat(${z.remaining})">🌱 سجّل دفع الزكاة</button>`:''}
+    <details style="margin-top:10px"><summary style="font-size:12.5px;color:var(--muted);cursor:pointer">⚙️ الإعدادات</summary>${form}</details>
+    <div class="wl-why">حساب تقريبي على رأي شائع (ربع العشر، نصاب ${NISAB_GRAMS} جرام ذهب عيار 24، عند تمام الحول). في الذهب الملبوس وعوائد الشهادات والديون آراء مختلفة — راجع جهة إفتاء موثوقة. العقارات غير التجارية مش محسوبة.</div>`;
+}
+function saveZakat(){
+  const hawl=document.getElementById('zkHawl')?.value||'';
+  const g=Number(document.getElementById('zkGold')?.value);
+  if(!isISODate(hawl)){ toast('اختار تاريخ الحول','error'); return false; }
+  if(!(g>0) || !isFinite(g) || g>1e6){ toast('اكتب سعر جرام عيار 24 صحيح','error'); return false; }
+  const prev=data.zakat;
+  data.zakat={ hawlDate:hawl, gold24:g,
+    includeGold:!!document.getElementById('zkIncGold')?.checked,
+    includeReceivables:!!document.getElementById('zkIncRecv')?.checked,
+    deductDebts:!!document.getElementById('zkDedDebt')?.checked, updatedAt:new Date().toISOString() };
+  if(!save()){ data.zakat=prev; toast('لم تُحفظ — تعذّر الحفظ على الجهاز','error'); return false; }
+  renderZakatCard(); toast('اتحفظت إعدادات الزكاة ✅');
+  return true;
+}
+function payZakat(amount){
+  openQadd(TX.CHARITY);
+  setTimeout(()=>{
+    const a=document.getElementById('qaddAmt'), c=document.getElementById('qaddCat');
+    if(a) a.value=Math.round(Number(amount)||0); if(c) c.value='زكاة مال';
+  }, 80);
+}
+
+function renderDecisionCard(){
+  const el=document.getElementById('decisionCard'); if(!el) return;
+  const list=DL.entries();
+  if(!PE.get() && !list.length){ el.style.display='none'; return; }
+  el.style.display='';
+  const T=DL.totals();
+  const when=(at)=>{ try{ return new Date(at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'numeric'}); }catch(e){ return ''; } };
+  const rows=list.slice(0,10).map(e=>{
+    if(e.kind==='plan'){ const p=e.plan;
+      return `<div class="wl-step"><span class="wl-n">🧭</span><span style="flex:1">${when(e.at)} · ${p.first?'عملت':'عدّلت'} خطتك: طوارئ ${p.emergencyMonths} شهور، ادخار ${p.savingsRatePct}%، شهادات ${p.allocation.cert}% · ذهب ${p.allocation.gold}% · أسهم ${p.allocation.equity}%</span></div>`; }
+    if(e.kind==='skip') return `<div class="wl-step"><span class="wl-n">⏭️</span><span style="flex:1">${when(e.at)} · اتخطّيت تقسيم ${esc(e.income)}${e.amount!=null?' '+fmt(e.amount):''}</span></div>`;
+    const parts=e.lines.map(l=>`${esc(l.category)} ${fmt(l.amount)}`).join('، ');
+    return `<div class="wl-step"><span class="wl-n">➗</span><span style="flex:1">${when(e.at)} · قسّمت ${esc(e.income)}${e.amount!=null?' '+fmt(e.amount):''}${parts?': '+parts:' (من غير حركات)'}</span></div>`;
+  }).join('');
+  el.innerHTML=`<div class="card-title"><div class="card-title-icon">📒</div>سجل القرارات</div>
+    ${T.splits||T.skipped?`<div class="wl-sub" style="font-size:12.5px;margin-bottom:6px">من أول الخطة: 🛟 طوارئ ${fmt(T.emergency)} · 🎯 أهداف ${fmt(T.goals)} · 📈 استثمار ${fmt(T.invest)} — ${T.splits} تقسيم${T.skipped?`، ${T.skipped} تخطّي`:''}</div>`:''}
+    ${rows || '<div class="wl-why">لسه مفيش قرارات — هتظهر هنا مع أول تقسيم دخل.</div>'}`;
+}
+
 // ── واجهة "ثروتي" ──
 let _planDraft=null;     // مقابلة الخطة الجارية (في الذاكرة فقط حتى الحفظ)
 function renderWealth(){
   try{ WE.recordSnapshot(); }catch(e){}
   renderWealthCard(); renderPlanCard();
+  try{ renderReviewCard(); renderZakatCard(); renderDecisionCard(); }catch(e){ console.warn(e); }
 }
 function renderWealthCard(){
   const el=document.getElementById('wealthCard'); if(!el) return;
@@ -11249,9 +11462,11 @@ function savePlan(){
             createdAt:(PE.get()&&PE.get().createdAt)||new Date().toISOString(), updatedAt:new Date().toISOString() };
   const err=PE.validate(p);
   if(err){ toast(err,'error'); return false; }
-  const prev=data.plan;
+  const prev=data.plan, prevLog=data.planLog;
   data.plan=p;
-  if(!save()){ data.plan=prev; toast('لم تُحفظ الخطة — تعذّر الحفظ على الجهاز','error'); return false; }
+  data.planLog=[...(Array.isArray(data.planLog)?data.planLog:[]),
+    { at:p.updatedAt, first:!prev, emergencyMonths:p.emergencyMonths, savingsRatePct:p.savingsRatePct, allocation:{...p.allocation} }].slice(-PLAN_LOG_MAX);
+  if(!save()){ data.plan=prev; data.planLog=prevLog; toast('لم تُحفظ الخطة — تعذّر الحفظ على الجهاز','error'); return false; }
   _planDraft=null; renderWealth();
   toast('اتحفظت خطتك ✅ '+cloudStatusText());
   return true;
@@ -11296,6 +11511,17 @@ function smartAlerts(){
     }
     for(const x of WE.stalePrices().slice(0,1))
       add(`stale:${x.a.id}:${mo}`, 1, '🏷️', `حدّث سعر "${x.a.name}" عشان ثروتك تتحسب صح`, null);
+    // مراجعة الشهر اللي فات — أول 10 أيام من الشهر
+    if(PE.get() && Number(today.slice(8,10))<=10){
+      const pm=MR.prevMonth();
+      add(`review:${pm}`, 1, '📅', `مراجعة ${monthLabelOf(pm)} جاهزة`, null, "switchTab('chart');switchAnalysis('wealth')");
+    }
+    // الزكاة: مستحقة، أو الحول خلال 14 يوم
+    const z=ZE.status();
+    if(z.configured){
+      if(z.dueNow && z.remaining>0) add(`zakat-due:${z.last}`, 2, '🕌', `زكاة مالك مستحقة: باقي ${fmt(z.remaining)}`, null, "switchTab('chart');switchAnalysis('wealth')");
+      else if(z.above && z.daysToNext!=null && z.daysToNext<=14) add(`zakat-soon:${z.next}`, 1, '🕌', `حولك بعد ${z.daysToNext} يوم — الزكاة التقريبية ${fmt(z.amount)}`, null, "switchTab('chart');switchAnalysis('wealth')");
+    }
   }catch(e){}
   const dis=proState().dismissed;
   return out.filter(a=>!dis[a.id]).sort((a,b)=>b.sev-a.sev).slice(0,4);
@@ -11311,7 +11537,7 @@ function renderAlertsCard(){
     list.map(a=>`<div class="al-row sev${a.sev}">
       <span class="al-ico">${a.icon}</span>
       <span class="al-txt">${esc(a.text)}</span>
-      ${a.act?`<button class="al-btn" onclick="${esc(a.act)}" aria-label="افتح">➗</button>`:''}
+      ${a.act?`<button class="al-btn" onclick="${esc(a.act)}" aria-label="افتح">${/openSplit/.test(a.act)?'➗':'↗'}</button>`:''}
       ${a.ask?`<button class="al-btn" onclick="askAssistant('${escJs(a.ask)}')" aria-label="اسأل المساعد">🤖</button>`:''}
       <button class="al-btn" onclick="dismissAlert('${escJs(a.id)}')" aria-label="إخفاء">✕</button>
     </div>`).join('');
