@@ -7309,9 +7309,10 @@ function buildQaddCats(filter){
   const q=(filter||'').toLowerCase().trim();
   const defaults=(DEFAULT_CATS[_qaddType]||[]);
   const usedMap=new Map();
+  const _qaddMo=((document.getElementById('qaddDate')||{}).value||today_str()).slice(0,7);   // العدّاد = مرات شهر الحركة
   data.transactions.filter(t=>t.type===_qaddType).forEach(t=>{
     const v=usedMap.get(t.category)||{count:0,total:0};
-    usedMap.set(t.category,{count:v.count+1,total:v.total+t.amount});
+    usedMap.set(t.category,{count:v.count+1,total:v.total+t.amount,month:(v.month||0)+((t.date||'').startsWith(_qaddMo)?1:0)});
   });
   const used=[...usedMap.entries()].sort((a,b)=>b[1].count-a[1].count).map(([n,v])=>({name:n,...v}));
   const shown=new Set();
@@ -7322,7 +7323,7 @@ function buildQaddCats(filter){
     html+=`<div class="qadd-cat-opt" onclick="selectQaddCat('${escJs(u.name)}')">
       <div class="qadd-cat-opt-icon">${getCatIconAny(u.name)}</div>
       <div style="flex:1"><div>${esc(u.name)}</div>${bgt}</div>
-      <span style="font-size:10px;color:var(--muted)">${u.count}×</span>
+      ${u.month?`<span style="font-size:10px;color:var(--muted)" title="مرات الشهر ده">${u.month}×</span>`:''}
     </div>`;
   });
   defaults.filter(d=>(!q||d.name.includes(q))&&!shown.has(d.name)).forEach(d=>{
